@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Audio Analysis</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 100vh;
+            background-color: #ffffff;
+            padding-top: 50px;
+        }
+
+        h1 {
+            margin: 10px 0;
+            font-size: 2.8em;
+        }
+
+        button {
+            padding: 15px 25px;
+            font-size: 1.4em;
+            cursor: pointer;
+            margin: 15px;
+        }
+
+        #visualization-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+            gap: 20px;
+        }
+
+        .intonation-item {
+            margin: 10px 0;
+            font-size: 2.4em;
+            font-weight: bold;
+            color: #444;
+        }
+
+        .green {
+            color: green;
+        }
+
+        .red {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Real-Time Audio Analysis</h1>
+    <button id="start-btn">Start Recording</button>
+    <button id="stop-btn" disabled>Stop Recording</button>
+
+    <div id="visualization-container">
+        <div id="frequency" class="intonation-item" style="display: none;"></div>
+        <div id="note" class="intonation-item" style="display: none;"></div>
+        <div id="cent-error" class="intonation-item" style="display: none;"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const startButton = document.getElementById("start-btn");
+        const stopButton = document.getElementById("stop-btn");
+        const frequencyDisplay = document.getElementById("frequency");
+        const noteDisplay = document.getElementById("note");
+        const centErrorDisplay = document.getElementById("cent-error");
+
+        let audioContext;
+        let mediaStreamSource;
+        let scriptProcessor;
+        let isRecording = false;
+        let segmentBuffer = [];
+        let segmentId = 0; // Unique ID for each segment
+        const frameRate = 44100;
+        const stepSize = frameRate * 0.1; // 0.1-second step (4410 samples)
+        const segmentSize = frameRate * 0.5; // 0.5-second segment (22050 samples)
+
+        console.log("[INFO] Page loaded. Ready for user interaction.");
+
+        startButton.addEventListener("click", startRecording);
+        stopButton.addEventListener("click", stopRecording);
+
+        function startRecording() {
+            console.log("[INFO] Start button clicked. Requesting microphone access...");
+            navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+                isRecording = true;
+                startButton.disabled = true;
+                stopButton.disabled = false;
+
+                console.log("[INFO] Microphone access granted. Recording started.");
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                mediaStreamSource = audioContext.createMediaStreamSource(stream);
+                scriptProcessor = audioContext.createScriptProcessor(512, 1, 1);
+
+                scriptProcessor.onaudioprocess = (event) => {
+                    if (!isRecording) return;
+
+                    const audioData = event.inputBuffer.getChannelData(0);
+                    processAudio(Array.from(audioData));
+                };
+
+                mediaStreamSource.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination);
+            }).catch((error) => {
+                console.error("[ERROR] Error accessing microphone:", error);
+                alert("Could not access microphone. Please allow microphone access.");
+            });
+        }
+
+        function stopRecording() {
+            console.log("[INFO] Stop button clicked. Stopping recording...");
+            isRecording = false;
+            startButton.disabled = false;
+            stopButton.disabled = true;
+
+            if (scriptProcessor) scriptProcessor.disconnect();
+            if (mediaStreamSource) mediaStreamSource.disconnect();
+            if (audioContext) audioContext.close();
+
+            console.log("[INFO] Recording stopped.");
+        }
+
+        function processAudio(audioData) {
+            console.log(`[DEBUG] Processing audio data. Current segment buffer length: ${segmentBuffer.length} samples.`);
+            segmentBuffer = segmentBuffer.concat(audioData);
+
+            console.log(`[DEBUG] Segment buffer length after concatenation: ${segmentBuffer.length}`);
+
+            // Process audio in 0.5-second segments, sliding by 0.1 seconds
+            while (segmentBuffer.length >= segmentSize) {
+                console.log(`[DEBUG] Sufficient buffer for processing. Buffer length: ${segmentBuffer.length}`);
+                const segment = segmentBuffer.slice(0, segmentSize);
+                segmentBuffer = segmentBuffer.slice(stepSize); // Slide buffer by 0.1 seconds
+
+                // Generate metadata for this segment
+                const now = new Date();
+                const segmentStartTime = new Date(now.getTime() - (segmentBuffer.length / frameRate) * 1000).toISOString();
+                const segmentEndTime = now.toISOString();
+
+                console.log(`[INFO] Sending audio segment. Segment ID: ${segmentId}, Start Time: ${segmentStartTime}, End Time: ${segmentEndTime}`);
+                sendAudio(segment, frameRate, segmentId, segmentStartTime, segmentEndTime);
+
+                segmentId++;
+            }
+        }
+
+        function sendAudio(audioData, sampleRate, id, startTime, endTime) {
+            const payload = {
+                audio: audioData,
+                frame_rate: sampleRate,
+                segment_id: id,
+                start_time: startTime,
+                end_time: endTime,
+            };
+
+            console.log(`[INFO] Emitting audio segment to server. Segment ID: ${id}, Payload size: ${audioData.length} samples.`);
+            socket.emit("audio_stream", payload);
+        }
+
+        socket.on("audio_response", (response) => {
+            console.log("[INFO] Received audio response from server:", response);
+            updateDisplay(response);
+        });
+
+        socket.on("error", (error) => {
+            console.error("[ERROR] Error received from server:", error);
+        });
+
+        function updateDisplay(data) {
+            const { frequencies, intonation } = data.results;
+
+            console.log("[DEBUG] Updating display with response data:", data);
+
+            if (frequencies && frequencies.length > 0) {
+                frequencyDisplay.textContent = `${frequencies[0].toFixed(1)} Hz`;
+                frequencyDisplay.style.display = "block";
+                console.log(`[INFO] Frequency displayed: ${frequencies[0].toFixed(1)} Hz`);
+            }
+
+            if (intonation && intonation["Name"]) {
+                noteDisplay.textContent = intonation["Name"];
+                noteDisplay.style.display = "block";
+                console.log(`[INFO] Note displayed: ${intonation["Name"]}`);
+            }
+
+            if (intonation && intonation["Cent Error"] !== undefined) {
+                const centErrorValue = intonation["Cent Error"].toFixed(1);
+                centErrorDisplay.textContent = `${centErrorValue >= 0 ? "+" : ""}${centErrorValue} cents`;
+                centErrorDisplay.style.color = centErrorValue >= 0 ? "green" : "red";
+                centErrorDisplay.style.display = "block";
+                console.log(`[INFO] Cent Error displayed: ${centErrorValue} cents`);
+            }
+        }
+    </script>
+</body>
+</html>

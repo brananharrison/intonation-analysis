@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "intonation-analysis"
+version = "0.1.0"
+description = "An intonation analysis app for musicians"
+authors = ["Branan Harrison"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pandas = "^2.2.3"
+numpy = "^2.2.1"
+scipy = "^1.14.1"
+matplotlib = "^3.10.0"
+pydub = "^0.25.1"
+music21 = "^9.3.0"
+asyncio = "^3.4.3"
+simpleaudio = "^1.0.4"
+eventlet = "^0.38.2"
+flask = "^3.1.0"
+flask-socketio = "^5.5.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

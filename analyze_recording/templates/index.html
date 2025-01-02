@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fourier Analysis</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 0;
+        }
+
+        h1 {
+            margin: 20px 0;
+        }
+
+        #visualization-container {
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            margin-top: 20px; /* Keep container at original position */
+        }
+
+        #plot {
+            max-width: 50%;
+            margin-right: 20px;
+        }
+
+        #frequency-box, #notes-box {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #444; /* Match font color */
+            text-align: center;
+            width: 200px;
+            margin-top: 50px; /* Move text further down relative to the plot */
+        }
+
+        #frequency-list, #notes-list {
+            text-align: center;
+            list-style-type: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        #frequency-list li, #notes-list li {
+            margin: 5px 0;
+            font-size: 1.8em; /* Match font size */
+            font-weight: bold; /* Match font weight */
+            color: #444; /* Match font color */
+        }
+
+        #notes-list li {
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+        }
+
+        #notes-list li span {
+            margin: 0 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 1.2em;
+            cursor: pointer;
+        }
+
+        audio {
+            margin-top: 20px;
+        }
+
+        #notes-box {
+            margin-left: 20px; /* Adjust spacing */
+            color: #555;
+        }
+    </style>
+    <script>
+        let plots = {{ plots|tojson|safe }};
+        let frequencies = {{ frequencies|tojson|safe }};
+        let notes = {{ notes|tojson|safe }};
+        let index = 0;
+        let timeoutId = null;
+
+        function showNextPlot() {
+            if (index < plots.length) {
+                const imgPath = "/exports/" + plots[index];
+                console.log("Trying to load image:", imgPath);
+
+                // Update the plot image
+                document.getElementById("plot").src = imgPath;
+
+                // Update the frequency display
+                let frequencyList = frequencies[index];
+                const frequencyBox = document.getElementById("frequency-list");
+                frequencyBox.innerHTML = ""; // Clear previous frequencies
+
+                if (frequencyList && Array.isArray(frequencyList)) {
+                    frequencyList.forEach(freq => {
+                        const li = document.createElement("li");
+                        li.textContent = freq.toFixed(2) + " Hz";
+                        frequencyBox.appendChild(li);
+                    });
+                } else {
+                    const li = document.createElement("li");
+                    li.textContent = "N/A";
+                    frequencyBox.appendChild(li);
+                }
+
+                // Update the notes display
+                let notesData = notes[index];
+                const notesBox = document.getElementById("notes-list");
+                notesBox.innerHTML = ""; // Clear previous notes
+
+                if (Array.isArray(notesData)) {
+                    notesData.forEach((note, noteIndex) => {
+                        const li = document.createElement("li");
+
+                        // Fix the top note in place
+                        if (noteIndex === 0) {
+                            li.style.position = "relative";
+                            li.style.top = "0";
+                        }
+
+                        // Create and append Name
+                        if (note.Name) {
+                            const nameSpan = document.createElement("span");
+                            nameSpan.textContent = note.Name;
+                            nameSpan.style.color = "#444"; // Match font color
+                            li.appendChild(nameSpan);
+                        }
+
+                        // Create and append Cent Error
+                        if (note["Cent Error"] !== undefined) {
+                            const centErrorSpan = document.createElement("span");
+                            const centErrorValue = note["Cent Error"].toFixed(1);
+                            centErrorSpan.textContent = centErrorValue;
+
+                            // Set color based on +/- 5 cents threshold
+                            centErrorSpan.style.color = Math.abs(centErrorValue) <= 5 ? "green" : "red";
+                            li.appendChild(centErrorSpan);
+                        }
+
+                        notesBox.appendChild(li);
+                    });
+                } else {
+                    const li = document.createElement("li");
+                    li.textContent = "N/A";
+                    notesBox.appendChild(li);
+                }
+
+                index++;
+                timeoutId = setTimeout(showNextPlot, 100); // Must align with frame rate of the audio segments
+            }
+        }
+
+        function startVisualization() {
+            index = 0;
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+
+            showNextPlot();
+
+            setTimeout(() => {
+                const audio = document.getElementById("audio");
+                audio.currentTime = 0;
+                audio.play();
+            }, 100); // Delay audio start by 0.1 seconds to sync with the first plot
+        }
+    </script>
+</head>
+<body>
+    <h1>Fourier Analysis Plots</h1>
+    <button onclick="startVisualization()">Start Visualization</button>
+    <audio id="audio" src="/audio" preload="auto" controls></audio>
+    <div id="visualization-container">
+        <img id="plot" src="" alt="Loading...">
+        <div id="frequency-box">
+            <ul id="frequency-list"></ul>
+        </div>
+        <div id="notes-box">
+            <ul id="notes-list"></ul>
+        </div>
+    </div>
+</body>
+</html>
