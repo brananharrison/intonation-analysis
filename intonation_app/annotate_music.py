@@ -36,8 +36,6 @@ def annotate_sheet_music(musicxml_file, csv_file_path):
             parent = parent.activeSite
         return round(total_offset, 2)
 
-    from music21 import note
-
     for part in score.parts:
         for n in part.recurse().notes:
             offset = calculate_global_offset(n)  # Get global offset recursively
