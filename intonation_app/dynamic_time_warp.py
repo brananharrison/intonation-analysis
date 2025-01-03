@@ -39,6 +39,10 @@ def shift_and_scale_audio_vectors(audio_vectors, shift=0.0, scale=1.0):
     return [(start * scale + shift, freq) for start, freq in audio_vectors]
 
 def apply_weighted_sum_to_obtain_one_to_one_mapping(intonation_errors):
+    # Load sheet_music_csv within the function
+    sheet_music_csv_path = 'exports/sheet_music_csv.csv'
+    sheet_music_csv = pd.read_csv(sheet_music_csv_path)
+
     # Convert intonation_errors to a DataFrame
     data = [
         {
@@ -46,7 +50,7 @@ def apply_weighted_sum_to_obtain_one_to_one_mapping(intonation_errors):
             "Audio Frequency (Hz)": audio[1],
             "Sheet Time (s)": sheet[0],
             "Sheet Frequency (Hz)": sheet[1],
-            "Intonation Error (cents)": 1200 * np.log2(audio[1] / sheet[1])  # Keep original intonation error
+            "Intonation Error (cents)": 1200 * np.log2(audio[1] / sheet[1])
         }
         for audio, sheet, _ in intonation_errors
     ]
@@ -72,9 +76,59 @@ def apply_weighted_sum_to_obtain_one_to_one_mapping(intonation_errors):
             )
             ) if group["Duration (s)"].sum() > 0 else group["Intonation Error (cents)"].mean()
         })
-    ).reset_index(drop=True)  # Drop the group index
+    ).reset_index(drop=True)
 
-    return aggregated_df
+    # Perform the left join with sheet_music_csv
+    joined_df = pd.merge(
+        sheet_music_csv[['start_time', 'note']],  # Select start_time and note columns
+        aggregated_df,
+        how='left',
+        left_on='start_time',
+        right_on='Sheet Time (s)'
+    )
+
+    # Fill null values for rows with the same note as an adjacent row
+    for index, row in joined_df.iterrows():
+        if pd.isnull(row['Sheet Time (s)']):
+            distances = []
+
+            # Look for preceding and succeeding rows with the same note
+            for offset in range(1, len(joined_df)):
+                preceding_index = index - offset if index - offset >= 0 else None
+                succeeding_index = index + offset if index + offset < len(joined_df) else None
+
+                if preceding_index is not None:
+                    preceding_row = joined_df.iloc[preceding_index]
+                    if preceding_row['note'] == row['note'] and not pd.isnull(preceding_row['Sheet Time (s)']):
+                        distances.append((offset, 'preceding', preceding_row))
+
+                if succeeding_index is not None:
+                    succeeding_row = joined_df.iloc[succeeding_index]
+                    if succeeding_row['note'] == row['note'] and not pd.isnull(succeeding_row['Sheet Time (s)']):
+                        distances.append((offset, 'succeeding', succeeding_row))
+
+                # Stop searching if we found at least one preceding and succeeding row
+                if distances:
+                    break
+
+            if distances:
+                # Sort by proximity (offset), prioritizing preceding rows
+                distances.sort(key=lambda x: (x[0], x[1] == 'succeeding'))
+                _, _, selected_row = distances[0]
+
+                # Copy values from the selected row
+                joined_df.at[index, 'Sheet Time (s)'] = selected_row['Sheet Time (s)']
+                joined_df.at[index, 'Sheet Frequency (Hz)'] = selected_row['Sheet Frequency (Hz)']
+                joined_df.at[index, 'Audio Frequency (Hz)'] = selected_row['Audio Frequency (Hz)']
+                joined_df.at[index, 'Intonation Error (cents)'] = selected_row['Intonation Error (cents)']
+
+    # Sort and format the resulting DataFrame
+    result_df = joined_df.sort_values(by='start_time').reset_index(drop=True)
+
+    result_df = result_df[['start_time', 'Sheet Frequency (Hz)', 'Audio Frequency (Hz)', 'Intonation Error (cents)']]
+
+    return result_df
+
 
 def run_dtw(transformed_audio, trimmed_sheet):
     path = []
@@ -85,7 +139,7 @@ def run_dtw(transformed_audio, trimmed_sheet):
     def is_eligible(a_time, a_value, s_time, s_value):
         freq_diff = abs(a_value - s_value) / max(a_value, s_value)
         time_diff = abs(a_time - s_time)
-        return (freq_diff <= 0.06 and time_diff <= 0.1) or (freq_diff <= 0.02 and time_diff <= 1)
+        return (freq_diff <= 0.06 and time_diff <= 0.1) or (freq_diff <= 0.02 and time_diff <= 0.5)
 
     # First pass: map each point in audio to the closest eligible point in sheet
     for i, (a_time, a_value) in enumerate(transformed_audio):
