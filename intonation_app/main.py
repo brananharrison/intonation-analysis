@@ -19,9 +19,9 @@ async def async_audio_to_json(audio_path):
 
 
 if __name__ == "__main__":
-    extract_audio_segment('/Users/branan/Downloads/How to play Twinkle Twinkle on the violin!.wav',
+    """extract_audio_segment('/Users/branan/Downloads/How to play Twinkle Twinkle on the violin!.wav',
                           '/Users/branan/Downloads/Twinkle_excerpt.wav',
-                          40, 95)
+                          40, 100)"""
 
     audio_path = "/Users/branan/Downloads/Twinkle_excerpt.wav"
     sheet_music_path = "/Users/branan/Downloads/Twinkle_Twinkle_Little_Star_-_Main_Theme.mxl"
@@ -36,15 +36,15 @@ if __name__ == "__main__":
 
 
     start_time = time.time()
-    #json_to_time_indexed_table(json_file_path="exports/audio_json.json",
-    #                           output_csv_path="exports/audio_csv.csv",
-    #                           appearance_threshold=2)
+    """json_to_time_indexed_table(json_file_path="exports/audio_json.json",
+                               output_csv_path="exports/audio_csv.csv",
+                               appearance_threshold=2)"""
     end_time = time.time()
     print(f"Json to csv compute time: {end_time - start_time:.2f} seconds.")
 
 
     start_time = time.time()
-    #musicxml_to_csv(sheet_music_path)
+    musicxml_to_csv(sheet_music_path)
     end_time = time.time()
     print(f"Sheet music path to csv compute time: {end_time - start_time:.2f} seconds.")
 
@@ -61,7 +61,7 @@ if __name__ == "__main__":
 
     start_time = time.time()
     annotate_sheet_music(sheet_music_path,
-                         "exports/one_to_one_mapping_to_sheet_music.csv")
+                         "exports/processed_intonation.csv")
     end_time = time.time()
     print(f"Export annotated sheet music compute time: {end_time - start_time:.2f} seconds.")
 
