@@ -92,7 +92,7 @@ def map_points_onto_sheet_music(valid_points, transformed_audio_vectors):
             for time, freq in transformed_audio_vectors:
                 if (
                         time_range[0] <= time <= time_range[1] and
-                        abs(freq - sheet_freq) / sheet_freq <= 0.05
+                        abs(freq - sheet_freq) / sheet_freq <= 0.052
                 ):
                     # Match found, update the row
                     result_df.at[index, 'audio_time'] = time
@@ -313,7 +313,7 @@ def find_optimal_transformation(audio_vectors, sheet_vectors,
     }
 
 
-def interpolate_notes_with_audio_json(result_df, optimal_shift, optimal_scale, audio_json_path):
+def interpolate_doubled_notes_with_audio_json(result_df, optimal_shift, optimal_scale, audio_json_path):
     # Load audio_json
     with open(audio_json_path, 'r') as f:
         audio_json = json.load(f)
@@ -415,6 +415,63 @@ def interpolate_notes_with_audio_json(result_df, optimal_shift, optimal_scale, a
     return updated_df
 
 
+def parse_single_null_values_using_audio_json(df, audio_json_path, optimal_shift, optimal_scale):
+    # Load the audio JSON file
+    with open(audio_json_path, 'r') as f:
+        audio_data = json.load(f)
+
+    # Check for null rows
+    null_rows = df[df['audio_time'].isnull() | df['audio_frequency'].isnull()]
+
+    if null_rows.empty:
+        return df  # No null rows, return as is
+
+    # Iterate over null rows
+    for index, row in null_rows.iterrows():
+        sheet_frequency = row['sheet_frequency']
+
+        # Find boundaries from the nearest non-null rows above and below
+        above_row = df.iloc[:index].dropna(subset=['audio_time', 'audio_frequency']).iloc[-1]
+        below_row = df.iloc[index+1:].dropna(subset=['audio_time', 'audio_frequency']).iloc[0]
+
+        above_time = above_row['audio_time']
+        below_time = below_row['audio_time']
+
+        # Undo transformation for boundaries
+        original_bounds = [
+            (above_time - optimal_shift) / optimal_scale,
+            (below_time - optimal_shift) / optimal_scale
+        ]
+
+        # Filter audio data within the boundaries
+        filtered_audio_data = [
+            entry for entry in audio_data if original_bounds[0] <= entry['start_time'] <= original_bounds[1]
+        ]
+
+        candidates = []
+        for entry in filtered_audio_data:
+            for freq in entry['frequency']:
+                if abs(freq - sheet_frequency) / sheet_frequency <= 0.052:
+                    candidates.append((freq, entry['start_time']))
+
+        if not candidates:
+            # Remove row if no matching frequency is found
+            df = df.drop(index)
+        else:
+            # Average the matching frequencies and times
+            matching_frequencies = [freq for freq, _ in candidates]
+            matching_times = [time for _, time in candidates]
+
+            avg_frequency = np.mean(matching_frequencies)
+            avg_time = np.mean(matching_times)
+
+            # Update the DataFrame
+            df.at[index, 'audio_frequency'] = round(avg_frequency, 4)
+            df.at[index, 'audio_time'] = (avg_time + optimal_shift) * optimal_scale
+
+    return df
+
+
 def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports"):
     if not os.path.exists(exports_dir):
         os.makedirs(exports_dir)
@@ -490,10 +547,14 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     # For each null audio point, find a matching point in transformed_audio_vectors
     # whose start time is between the start time before and after
     valid_points_df = map_points_onto_sheet_music(valid_points, transformed_audio_vectors)
+    valid_points_df.loc[6, ['audio_time', 'audio_frequency']] = None
     valid_points_df.to_csv(os.path.join(exports_dir, 'original_points_mapped.csv'), index=False)
 
-    # Handle cases where no notes are mapped (like when algo doesn't detect separation between repeated notes)
-    processed_points = interpolate_notes_with_audio_json(valid_points_df, optimal_shift, optimal_scale, "exports/audio_json.json")
+    # Parse remaining single-null values with audio_json, or remove the row if no match
+    valid_points_without_null_df = parse_single_null_values_using_audio_json(valid_points_df, "exports/audio_json.json", optimal_shift, optimal_scale)
+
+    # Handles the case where algo didn't detect the break in a doubled note
+    processed_points = interpolate_doubled_notes_with_audio_json(valid_points_without_null_df, optimal_shift, optimal_scale, "exports/audio_json.json")
 
     # Analyze intonation errors
     intonation = analyze_intonation(processed_points)
