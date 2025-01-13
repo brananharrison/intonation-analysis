@@ -322,6 +322,11 @@ def interpolate_doubled_notes_with_audio_json(result_df, optimal_shift, optimal_
     audio_data = pd.DataFrame(audio_json)
 
     def get_average_frequency(subset_bounds, audio_data, sheet_frequency, optimal_shift, optimal_scale):
+
+
+        # FIX THIS IT'S NOT ROBUST
+        # maybe instead of taking a fixed range, iterate out from the center until you find the true start and end of the note, and then split that in 2
+
         # Inverse-transform the subset bounds to match the original data
         original_bounds = [
             (subset_bounds[0] - optimal_shift) / optimal_scale,
@@ -393,7 +398,7 @@ def interpolate_doubled_notes_with_audio_json(result_df, optimal_shift, optimal_
                 search_bounds = row['search_bounds']
                 sheet_frequency = row['sheet_frequency']
                 subset_average_frequency = get_average_frequency(search_bounds, audio_data, sheet_frequency, optimal_shift, optimal_scale)
-                subset_average_frequency_list.append(subset_average_frequency)
+                subset_average_frequency_list.append(subset_average_frequency if not pd.isna(subset_average_frequency) else group['audio_frequency'].iloc[i])
             group['subset_average_frequency'] = subset_average_frequency_list
 
             # Assign subset_average_frequency to Audio Frequency (Hz)
@@ -482,7 +487,7 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     audio_vectors, sheet_vectors = prepare_vectors(audio_data_df, sheet_music_df, frequencies)
 
     # Plot un-normalized data
-    plot_results(audio_vectors, sheet_vectors, title="Un-normalized Audio and Sheet Music Alignment")
+    #plot_results(audio_vectors, sheet_vectors, title="Un-normalized Audio and Sheet Music Alignment")
 
     # Optimize transformation
     audio_duration = audio_vectors[-1][0] - audio_vectors[0][0]
@@ -529,6 +534,7 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
 
     # Apply optimized shift and scale
     transformed_audio_vectors = shift_and_scale_audio_vectors(audio_vectors, shift=optimal_shift, scale=optimal_scale)
+    plot_results(transformed_audio_vectors, sheet_vectors, "Transformed audio vectors vs sheet vectors")
 
     # Map vectors with octave correction
     valid_points = map_valid_points_with_octave_correction(transformed_audio_vectors, sheet_vectors)
@@ -541,13 +547,12 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     adjusted_sheet_vectors = [(sheet[0], sheet[1]) for _, sheet in valid_points]
 
     # Plot results
-    plot_results(adjusted_audio_vectors, adjusted_sheet_vectors, "Optimized Audio and Sheet Music Alignment", valid_points)
+    #plot_results(adjusted_audio_vectors, adjusted_sheet_vectors, "Optimized Audio and Sheet Music Alignment", valid_points)
 
     # Map points onto sheet music
     # For each null audio point, find a matching point in transformed_audio_vectors
     # whose start time is between the start time before and after
     valid_points_df = map_points_onto_sheet_music(valid_points, transformed_audio_vectors)
-    valid_points_df.loc[6, ['audio_time', 'audio_frequency']] = None
     valid_points_df.to_csv(os.path.join(exports_dir, 'original_points_mapped.csv'), index=False)
 
     # Parse remaining single-null values with audio_json, or remove the row if no match

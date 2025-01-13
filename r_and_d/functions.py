@@ -256,11 +256,32 @@ def find_all_fundamental_frequencies(groups):
    if not groups:
       return []
 
-   fundamental_frequencies = [(group[0][0], group[0][1]) for group in groups if group]
-   if not fundamental_frequencies:
-      return []
+   fundamental_frequencies = []
+   for group in groups:
+      if not group:
+         continue
 
-   return sorted(freq for freq, amp in fundamental_frequencies)
+      # Sort the group by frequency to ensure correct order
+      group = sorted(group, key=lambda x: x[0])
+
+      # Get the bottom frequency and amplitude
+      bottom_frequency, bottom_amplitude = group[0]
+
+      # Default to the bottom frequency
+      fundamental_frequency = bottom_frequency
+
+      # Check if the bottom frequency amplitude is < 0.05
+      if bottom_amplitude < 0.05:
+         # Check if there's a next highest frequency
+         if len(group) > 1:
+            next_frequency, next_amplitude = group[1]
+            # If the next highest frequency has amplitude > 0.5, use it
+            if next_amplitude > 0.5:
+               fundamental_frequency = next_frequency
+
+      fundamental_frequencies.append(fundamental_frequency)
+
+   return sorted(fundamental_frequencies)
 
 
 def find_nearest_interval(ratio):
