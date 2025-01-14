@@ -22,6 +22,7 @@ def analyze_window(audio_data, frame_rate, current_start_time, current_end_time,
 
         # Save graph with unique name
         plot_name = f"plot_{graph_index}"
+        print(plot_name)
         # Return the data
         return {
             "plot": plot_name,
