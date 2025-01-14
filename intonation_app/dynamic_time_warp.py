@@ -76,7 +76,7 @@ def map_points_onto_sheet_music(valid_points, transformed_audio_vectors):
 
     # Truncate rows where sheet_time exceeds the maximum audio time
     max_audio_time = df['audio_time'].max()
-    joined_df = joined_df[joined_df['sheet_time'] <= max_audio_time]
+    joined_df = joined_df[joined_df['sheet_time'] <= max_audio_time + 1]
 
     # Select and format the required columns
     result_df = joined_df[['sheet_time', 'sheet_frequency', 'audio_time', 'audio_frequency']]
