@@ -19,18 +19,16 @@ async def async_audio_to_json(audio_path):
 
 
 if __name__ == "__main__":
-    extract_audio_segment('/Users/branan/Downloads/How to play Twinkle Twinkle on the violin!.wav',
-                          '/Users/branan/Downloads/Twinkle_excerpt.wav',
-                          40, 100)
 
-    audio_path = "/Users/branan/Downloads/Twinkle_excerpt.wav"
-    sheet_music_path = "/Users/branan/Downloads/Twinkle_Twinkle_Little_Star_-_Main_Theme.mxl"
+    audio_path = "/Users/branan/Downloads/J.S. Bach： Sonata for Violin Solo No. 2 in A Minor, BWV 1003 - 3. Andante.wav"
+    sheet_music_path = "/Users/branan/Downloads/shortened_bach_andante.mxl"
 
+    extract_audio_segment(audio_path, "/Users/branan/Downloads/shortened_audio.wav", 0, 15)
 
     print("Starting process...")
     overall_start_time = time.time()
     start_time = time.time()
-    asyncio.run(async_audio_to_json(audio_path))
+    asyncio.run(async_audio_to_json("/Users/branan/Downloads/shortened_audio.wav"))
     end_time = time.time()
     print(f"Audio to json compute time: {end_time - start_time:.2f} seconds.")
 
@@ -43,7 +41,7 @@ if __name__ == "__main__":
 
 
     start_time = time.time()
-    #musicxml_to_csv(sheet_music_path)
+    musicxml_to_csv(sheet_music_path)
     end_time = time.time()
     print(f"Sheet music path to csv compute time: {end_time - start_time:.2f} seconds.")
 
