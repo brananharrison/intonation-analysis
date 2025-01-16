@@ -41,11 +41,11 @@ def load_data(audio_csv_path, sheet_csv_path):
 
 def prepare_vectors(audio_data_df, sheet_music_df, frequencies):
     audio_vectors = [
-        (row['start_time'], round(row['average_frequency'], 4), row['note_count'])
+        (row['start_time'], round(row['frequency'], 4), row['note_count'])
         for _, row in audio_data_df.iterrows()
     ]
     sheet_vectors = [
-        (row['start_time'], frequencies[row['note']])
+        (row['start_time'], row['end_time'], frequencies[row['note']])
         for _, row in sheet_music_df.iterrows()
     ]
     return audio_vectors, sheet_vectors
@@ -55,8 +55,7 @@ def shift_and_scale_audio_vectors(audio_vectors, shift=0.0, scale=1.0):
     return [(start * scale + shift, freq, note_count) for start, freq, note_count in audio_vectors]
 
 
-def map_points_onto_sheet_music(valid_points, transformed_audio_vectors):
-
+def map_points_onto_sheet_music(valid_points):
     # Load sheet_music_csv within the function
     sheet_music_csv_path = 'exports/sheet_music_csv.csv'
     sheet_music_csv = pd.read_csv(sheet_music_csv_path)
@@ -65,125 +64,56 @@ def map_points_onto_sheet_music(valid_points, transformed_audio_vectors):
 
     # Convert valid_points to a DataFrame
     data = [
-        {"audio_time": audio[0], "audio_frequency": audio[1], "sheet_time": sheet[0], "sheet_frequency": sheet[1]}
+        {"audio_time": round(audio[0], 2), "audio_frequency": audio[1],
+         "sheet_start_time": sheet[0], "sheet_end_time": sheet[1],
+         "sheet_frequency": sheet[2]}
         for audio, sheet in valid_points
     ]
     df = pd.DataFrame(data)
 
-    # Left join with sheet_music_csv
+    # Join with sheet_music_csv on sheet_start_time, sheet_end_time, and sheet_frequency
     joined_df = pd.merge(
-        sheet_music_csv[['start_time', 'sheet_frequency']],  # Include calculated sheet_frequency
+        sheet_music_csv[['start_time', 'end_time', 'sheet_frequency']],
         df,
         how='left',
-        left_on=['start_time', 'sheet_frequency'],
-        right_on=['sheet_time', 'sheet_frequency']
+        left_on=['start_time', 'end_time', 'sheet_frequency'],
+        right_on=['sheet_start_time', 'sheet_end_time', 'sheet_frequency']
     )
 
-    # Drop redundant columns and rename for clarity
-    joined_df = joined_df.drop(columns=['sheet_time']).rename(columns={'start_time': 'sheet_time'})
-
-    # Truncate rows where sheet_time exceeds the maximum audio time
-    max_audio_time = df['audio_time'].max()
-    max_audio_time = joined_df.loc[joined_df['sheet_time'] > max_audio_time, 'sheet_time'].min() or max_audio_time
-    joined_df = joined_df[joined_df['sheet_time'] <= max_audio_time]
-
     # Select and format the required columns
-    result_df = joined_df[['sheet_time', 'sheet_frequency', 'audio_time', 'audio_frequency']]
+    result_df = joined_df[['audio_time', 'audio_frequency', 'sheet_start_time', 'sheet_end_time', 'sheet_frequency']]
 
-    for index, row in result_df[result_df['audio_time'].isnull()].iterrows():
-        # Get the row above
-        above = (
-            result_df.iloc[:index]
-            .loc[~result_df['audio_time'].isnull()]
-            .iloc[-1]
-            if index > 0 and not result_df.iloc[:index].loc[~result_df['audio_time'].isnull()].empty
-            else None
-        )
-
-        # Get the row below
-        valid_below = result_df.iloc[index + 1:].loc[~result_df['audio_time'].isnull()]
-        below = valid_below.iloc[0] if not valid_below.empty else None
-
-        if above is not None and below is not None:
-            time_range = (above['audio_time'], below['audio_time'])
-
-            # Enforce time order
-            if time_range[0] is not None and time_range[1] is not None and time_range[0] > time_range[1]:
-                continue
-
-            # Check for matching frequency within 5% in transformed_audio_vectors
-            sheet_freq = row['sheet_frequency']
-
-            for time, freq, _ in transformed_audio_vectors:
-                if (
-                        time_range[0] <= time <= time_range[1] and
-                        abs(freq - sheet_freq) / sheet_freq <= 0.052
-                ):
-                    # Match found, update the row
-                    result_df.at[index, 'audio_time'] = time
-                    result_df.at[index, 'audio_frequency'] = freq
-                    break
+    # Sort the DataFrame by sheet_start_time, sheet_end_time, and audio_time in ascending order
+    result_df = result_df.sort_values(by=['sheet_start_time', 'sheet_end_time', 'audio_time'], ascending=True)
 
     return result_df
 
 
 def run_dtw(transformed_audio, trimmed_sheet):
-    path = []
-    audio_mapped = set()
-    sheet_mapped = set()
+    mapping = {}
 
     # Helper function to check mapping eligibility
-    def is_eligible(a_time, a_value, s_time, s_value):
-        freq_diff = abs(a_value - s_value) / max(a_value, s_value)
-        time_diff = abs(a_time - s_time)
-        return (freq_diff <= 0.052 and time_diff <= 0.1) or (freq_diff <= 0.02 and time_diff <= 0.5)
+    def is_eligible(a_start_time, a_freq, s_start_time, s_end_time, s_freq):
+        # Check if the audio note's start time falls within the sheet's time range
+        if not (s_start_time <= a_start_time < s_end_time):
+            return False
+        # Check if the frequency difference is within the allowed threshold
+        freq_diff = abs(a_freq - s_freq) / max(a_freq, s_freq)
+        return freq_diff <= 0.045
 
-    # First pass: map each point in audio to the closest eligible point in sheet
-    for i, (a_time, a_value, _) in enumerate(transformed_audio):  # Unpack note_count but ignore it
-        best_distance = float('inf')
-        best_index = None
+    # Iterate over each audio note
+    for a_time, a_value, _ in transformed_audio:  # Unpack note_count but ignore it
+        # Iterate over each entry in the trimmed sheet
+        for s_start_time, s_end_time, s_value in trimmed_sheet:
+            if is_eligible(a_time, a_value, s_start_time, s_end_time, s_value):
+                key = (s_start_time, s_end_time, s_value)
 
-        for j, (s_time, s_value) in enumerate(trimmed_sheet):
-            if j in sheet_mapped:
-                continue
+                # Add the audio note to the corresponding sheet entry
+                if key not in mapping:
+                    mapping[key] = []
+                mapping[key].append((a_time, a_value))
 
-            if is_eligible(a_time, a_value, s_time, s_value):
-                distance = np.sqrt((a_time - s_time) ** 2 + (a_value - s_value) ** 2)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_index = j
-
-        if best_index is not None:
-            path.append((i, best_index))
-            audio_mapped.add(i)
-            sheet_mapped.add(best_index)
-
-    # Second pass: map unmatched points in sheet to the closest eligible point in audio
-    for j, (s_time, s_value) in enumerate(trimmed_sheet):
-        if j in sheet_mapped:
-            continue
-
-        best_distance = float('inf')
-        best_index = None
-
-        for i, (a_time, a_value, _) in enumerate(transformed_audio):  # Unpack note_count but ignore it
-            if i in audio_mapped:
-                continue
-
-            if is_eligible(a_time, a_value, s_time, s_value):
-                distance = np.sqrt((a_time - s_time) ** 2 + (a_value - s_value) ** 2)
-                if distance < best_distance:
-                    best_distance = distance
-                    best_index = i
-
-        if best_index is not None:
-            path.append((best_index, j))
-            audio_mapped.add(best_index)
-            sheet_mapped.add(j)
-
-    # Sort the path for consistency
-    path.sort()
-    return path
+    return mapping
 
 
 def calculate_total_distance(transformed_audio, trimmed_sheet, path):
@@ -199,33 +129,36 @@ def calculate_total_distance(transformed_audio, trimmed_sheet, path):
     return total_distance
 
 
-def map_valid_points(audio_vectors, sheet_vectors):
-    path = run_dtw(audio_vectors, sheet_vectors)
+def map_valid_points(mapping):
     valid_points = []
 
-    for audio_idx, sheet_idx in path:
-        if 0 <= audio_idx < len(audio_vectors) and 0 <= sheet_idx < len(sheet_vectors):
-            audio_time, audio_freq, _ = audio_vectors[audio_idx]
-            sheet_time, sheet_freq = sheet_vectors[sheet_idx]
+    for sheet_key, audio_values in mapping.items():
+        sheet_start_time, sheet_end_time, sheet_freq = sheet_key
 
-            valid_points.append(((audio_time, audio_freq), (sheet_time, sheet_freq)))
+        for audio_time, audio_freq in audio_values:
+            valid_points.append(((audio_time, audio_freq), (sheet_start_time, sheet_end_time, sheet_freq)))
 
     return valid_points
 
 def analyze_intonation(valid_points):
-    # Create a DataFrame with calculated Cent Error
+    # Avoid division by zero or invalid log operations by filtering out problematic rows
+    valid_points = valid_points.dropna(subset=['audio_frequency', 'sheet_frequency'])
+    valid_points = valid_points[valid_points['audio_frequency'] > 0]
+    valid_points = valid_points[valid_points['sheet_frequency'] > 0]
+
+    # Calculate Cent Error
     valid_points['cent_error'] = 1200 * np.log2(
-        valid_points['audio_frequency'] / valid_points['sheet_frequency'])
+        valid_points['audio_frequency'] / valid_points['sheet_frequency']
+    )
 
-    # Select and rename columns for clarity
-    result_df = valid_points.rename(columns={
-        'sheet_time': 'time',
-        'audio_frequency': 'audio_frequency',
-        'sheet_frequency': 'sheet_frequency',
-        'cent_error': 'cent_error'
-    })[['time', 'audio_frequency', 'sheet_frequency', 'cent_error']]
+    # Group by 'sheet_start_time' and 'sheet_frequency' and calculate averages
+    grouped_df = (
+        valid_points
+        .groupby(['sheet_start_time', 'sheet_frequency'], as_index=False)
+        .agg({'audio_frequency': 'mean', 'cent_error': 'mean'})
+    )
 
-    return result_df
+    return grouped_df
 
 
 def trim_vectors(vectors, trim_start, trim_end):
@@ -236,19 +169,27 @@ def save_results(output_csv_path, valid_points):
         {
             "audio_time": audio[0],
             "audio_frequency": audio[1],
-            "sheet_time": sheet[0],
-            "sheet_frequency": sheet[1]
+            "sheet_start_time": sheet[0],
+            "sheet_end_time": sheet[1],
+            "sheet_frequency": sheet[2]
         }
         for audio, sheet in valid_points
     ])
     mapping_df.to_csv(output_csv_path, index=False)
 
+
 def plot_results(audio_vectors, sheet_vectors, title, valid_points=None):
     plt.figure(figsize=(12, 8))
 
-    # Extract times and frequencies for sheet vectors
-    sheet_times = [start for start, _ in sheet_vectors]
-    sheet_freqs = [freq for _, freq in sheet_vectors]
+    # Plot straight lines for each tuple in sheet_vectors
+    for i, (start_time, end_time, frequency) in enumerate(sheet_vectors):
+        plt.plot([start_time, end_time], [frequency, frequency], color='cornflowerblue',
+                 label='Sheet Music Frequencies' if i == 0 else "")
+        # Add a vertical divider at the start and end of each interval
+        plt.plot([start_time, start_time], [frequency - 10, frequency + 10], color='blue', linestyle=':', linewidth=1,
+                 label='Interval Start' if i == 0 else "")
+        plt.plot([end_time, end_time], [frequency - 10, frequency + 10], color='orange', linestyle=':', linewidth=1,
+                 label='Interval End' if i == 0 else "")
 
     # Extract times and frequencies for audio vectors dynamically
     try:
@@ -260,13 +201,19 @@ def plot_results(audio_vectors, sheet_vectors, title, valid_points=None):
         audio_times = [start for start, _ in audio_vectors]
         audio_freqs = [freq for _, freq in audio_vectors]
 
-    plt.plot(sheet_times, sheet_freqs, label='Sheet Music Frequencies', color='cornflowerblue', marker='o')
-    plt.plot(audio_times, audio_freqs, label='Audio Frequencies', color='lightcoral', marker='o')
+    # Plot individual points for audio frequencies
+    plt.scatter(audio_times, audio_freqs, label='Audio Frequencies', color='lightcoral', marker='.')
 
+    # Plot valid points if provided
     if valid_points:
-        for (audio_time, audio_freq), (sheet_time, sheet_freq) in valid_points:
-            plt.plot([audio_time, sheet_time], [audio_freq, sheet_freq], color='green', linestyle='--', linewidth=1)
+        for (audio_time, audio_freq), (sheet_start_time, sheet_end_time, sheet_freq) in valid_points:
+            # Map audio_time to the nearest point on the sheet interval
+            closest_sheet_time = max(min(audio_time, sheet_end_time), sheet_start_time)
 
+            plt.plot([audio_time, closest_sheet_time], [audio_freq, sheet_freq], color='green', linestyle='--',
+                     linewidth=2)
+
+    # Add title and labels
     plt.title(title)
     plt.xlabel('Time (s)')
     plt.ylabel('Frequency (Hz)')
@@ -298,52 +245,39 @@ def find_optimal_transformation(audio_vectors, sheet_vectors,
     optimal_shift = 0
     optimal_scale = 1
     best_match_count = 0
-    best_distance = float('inf')
+    best_mapping = {}
 
     count = 0
 
-    def calculate_weighted_match_count(path, transformed_audio):
-        return sum(10 + transformed_audio[i][2] for i, _ in path)  # Sum of note_count from matched audio points
+    def calculate_match_count(mapping):
+        return sum(len(v) for v in mapping.values())  # Count total matches from the dictionary
 
     for shift in np.arange(shift_range[0], shift_range[1] + shift_step, shift_step):
         for scale in np.arange(scale_range[0], scale_range[1] + scale_step, scale_step):
             transformed_audio = shift_and_scale_audio_vectors(audio_vectors, shift=shift, scale=scale)
-            path = run_dtw(transformed_audio, sheet_vectors)
-            total_distance = calculate_total_distance(transformed_audio, sheet_vectors, path)
-            weighted_match_count = calculate_weighted_match_count(path, transformed_audio)
+            mapping = run_dtw(transformed_audio, sheet_vectors)
+            match_count = calculate_match_count(mapping)
 
             # Total calculations count
             count += 1
 
-            # Prioritize higher weighted match count, and then lower total distance
-            if weighted_match_count > best_match_count or (weighted_match_count == best_match_count and total_distance < best_distance):
-                print(f"Shift: {shift}, Scale: {scale}, Total Distance: {total_distance}, Weighted Matched Points: {weighted_match_count}")
-                best_distance = total_distance
-                best_match_count = weighted_match_count
+            # Prioritize higher match count, and then lower total distance
+            if match_count > best_match_count:
+                print(f"Shift: {shift}, Scale: {scale}, Matched Points: {match_count}")
+                best_match_count = match_count
                 optimal_shift = shift
                 optimal_scale = scale
+                best_mapping = mapping
 
     # Final Results
     return {
         "optimal_shift": optimal_shift,
         "optimal_scale": optimal_scale,
-        "best_distance": best_distance,
+        "best_mapping": best_mapping,
         "best_match_count": best_match_count,
         "count": count
     }
 
-
-import json
-import pandas as pd
-import numpy as np
-
-import json
-import pandas as pd
-import numpy as np
-
-import json
-import pandas as pd
-import numpy as np
 
 def interpolate_doubled_notes_with_audio_json(result_df, optimal_shift, optimal_scale, audio_json_path, audio_csv_path):
     # Load audio_json

@@ -1,5 +1,5 @@
 import csv
-from music21 import converter, environment, stream
+from music21 import converter, environment, stream, note, chord
 from PIL import Image, ImageOps
 import glob
 import os
@@ -44,38 +44,77 @@ def annotate_sheet_music(musicxml_file, csv_file_path):
         return round(total_offset, 2)
 
     for part in score.parts:
+        print(f"Processing part: {part.id}")
         for n in part.recurse().notes:
+            print(f"Processing element: {n}, Type: {type(n)}")
             offset = calculate_global_offset(n)
+            print(f"Offset: {offset}")
+
             if offset in intonation_map:
+                print(f"Intonation matches found for offset {offset}")
                 # Sort by frequency for stacking
                 matches = sorted(
                     intonation_map[offset],
                     key=lambda freq_dev: freq_dev[0],
                     reverse=True  # Higher frequencies appear first
                 )
+                print(f"Matches: {matches}")
 
-                # Annotate each note
+                # Annotate each note or chord
                 n.lyrics = []  # Clear existing lyrics
-                for idx, (expected_freq, deviation) in enumerate(matches):
-                    if abs(n.pitch.frequency - expected_freq) > 5:  # Frequency tolerance
-                        continue
-                    annotation = f"{deviation:.1f}"
-                    n.insertLyric(annotation, applyRaw=True)
-                    lyric = n.lyrics[-1]
+                if isinstance(n, note.Note):
+                    print(f"Processing Note: {n.nameWithOctave}")
+                    pitch_freq = n.pitch.frequency
+                    print(f"Note frequency: {pitch_freq}")
+                    for idx, (expected_freq, deviation) in enumerate(matches):
+                        if abs(pitch_freq - expected_freq) > 5:  # Frequency tolerance
+                            print(f"Skipping match {idx}: {pitch_freq} vs {expected_freq}")
+                            continue
+                        annotation = f"{deviation:.1f}"
+                        print(f"Adding annotation: {annotation}")
+                        n.addLyric(annotation)
+                        lyric = n.lyrics[-1]
 
-                    # Adjust vertical stacking
-                    if lyric.style.relativeY is None:
-                        lyric.style.relativeY = 0
-                    lyric.style.relativeY += idx * 10
+                        # Adjust vertical stacking
+                        if lyric.style.relativeY is None:
+                            lyric.style.relativeY = 0
+                        lyric.style.relativeY += idx * 10
 
-                    lyric.style.fontSize = 5
+                        lyric.style.fontSize = 5
 
-                    # Color styling based on deviation
-                    lyric.style.color = '#FF6666' if abs(deviation) > 5 else 'green'
+                        # Color styling based on deviation
+                        lyric.style.color = '#FF6666' if abs(deviation) > 5 else 'green'
+                        print(f"Annotation added: {annotation}, relativeY: {lyric.style.relativeY}")
+
+                elif isinstance(n, chord.Chord):
+                    print(f"Processing Chord: {n.pitchedCommonName}")
+                    for pitch in n.pitches:
+                        pitch_freq = pitch.frequency
+                        print(f"Pitch: {pitch.nameWithOctave}, Frequency: {pitch_freq}")
+                        for idx, (expected_freq, deviation) in enumerate(matches):
+                            if abs(pitch_freq - expected_freq) > 5:  # Frequency tolerance
+                                print(f"Skipping match {idx}: {pitch_freq} vs {expected_freq}")
+                                continue
+                            annotation = f"{deviation:.1f}"
+                            print(f"Adding annotation: {annotation} to pitch: {pitch.nameWithOctave}")
+                            n.addLyric(annotation)
+                            lyric = n.lyrics[-1]
+
+                            # Adjust vertical stacking
+                            if lyric.style.relativeY is None:
+                                lyric.style.relativeY = 0
+                            lyric.style.relativeY += idx * 10
+
+                            lyric.style.fontSize = 5
+
+                            # Color styling based on deviation
+                            lyric.style.color = '#FF6666' if abs(deviation) > 5 else 'green'
+                            print(f"Annotation added: {annotation}, relativeY: {lyric.style.relativeY}")
 
     # Save annotated MusicXML file
     annotated_file = os.path.join(musescore_dir, 'annotated.xml')
     score.write('musicxml', fp=annotated_file)
+    print(f"Annotated MusicXML saved to {annotated_file}")
 
     # Generate PNGs using MuseScore
     score.write('musicxml.png', fp=os.path.join(musescore_dir, 'annotated'))
