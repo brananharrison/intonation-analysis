@@ -17,13 +17,11 @@ def json_to_time_indexed_table(json_file_path, output_csv_path, note_count_limit
     # Data structures
     current_notes = {}  # Tracks ongoing notes
     prepare_data_frame = []  # Notes ready to be added to the DataFrame
-    groups = {}  # Tracks note groups
-    group_id_counter = 1  # Unique ID for each group
 
     # Process each entry
     for entry in json_data:
-        start_time = entry["start_time"]
-        end_time = entry["end_time"]
+        start_time = round(entry["start_time"], 3)
+        end_time = round(entry["end_time"], 3)
         frequencies = entry["frequency"]
         notes = entry["notes"]
 
@@ -37,29 +35,19 @@ def json_to_time_indexed_table(json_file_path, output_csv_path, note_count_limit
             if note_name in current_notes:
                 # Update the ongoing note
                 current_note = current_notes[note_name]
-                current_note["frequency_sum"] += frequency
+                current_note["frequencies"].append(frequency)
+                current_note["end_times"].append(end_time)  # Track end time of each note occurrence
+                current_note["start_times"].append(start_time)
                 current_note["count"] += 1
-                current_note["end_time"] = end_time
-                current_note["frequencies"].append(frequency)  # Add frequency to list
                 current_entry_notes[note_name] = True
             else:
                 # Create a new note group if not present in current_notes
                 current_notes[note_name] = {
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "frequency_sum": frequency,
-                    "count": 1,
-                    "frequencies": [frequency],  # Initialize list with the first frequency
-                    "group_id": group_id_counter,
+                    "start_times": [start_time],
+                    "end_times": [end_time],
+                    "frequencies": [frequency],
+                    "count": 1
                 }
-                groups[group_id_counter] = {
-                    "note": note_name,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "frequency_sum": frequency,
-                    "count": 1,
-                }
-                group_id_counter += 1
                 current_entry_notes[note_name] = True
 
         # Handle notes not present in the current entry
@@ -67,15 +55,14 @@ def json_to_time_indexed_table(json_file_path, output_csv_path, note_count_limit
         for note_name, note_data in current_notes.items():
             if note_name not in current_entry_notes:
                 # Finalize the note
-                average_frequency = note_data["frequency_sum"] / note_data["count"]
-                prepare_data_frame.append({
-                    "start_time": note_data["start_time"],
-                    "end_time": note_data["end_time"],
-                    "note": note_name,
-                    "average_frequency": average_frequency,
-                    "note_count": note_data["count"],
-                    "frequencies": note_data["frequencies"],  # Add the list of frequencies
-                })
+                for i, start_time in enumerate(note_data["start_times"]):
+                    prepare_data_frame.append({
+                        "start_time": start_time,
+                        "end_time": note_data["end_times"][i],
+                        "note": note_name,
+                        "frequency": note_data["frequencies"][i],
+                        "note_count": note_data["count"]
+                    })
                 notes_to_remove.append(note_name)
 
         # Remove finalized notes from current_notes
@@ -84,15 +71,14 @@ def json_to_time_indexed_table(json_file_path, output_csv_path, note_count_limit
 
     # Finalize remaining notes in current_notes
     for note_name, note_data in current_notes.items():
-        average_frequency = note_data["frequency_sum"] / note_data["count"]
-        prepare_data_frame.append({
-            "start_time": note_data["start_time"],
-            "end_time": note_data["end_time"],
-            "note": note_name,
-            "average_frequency": average_frequency,
-            "note_count": note_data["count"],
-            "frequencies": note_data["frequencies"],  # Add the list of frequencies
-        })
+        for i, start_time in enumerate(note_data["start_times"]):
+            prepare_data_frame.append({
+                "start_time": start_time,
+                "end_time": note_data["end_times"][i],
+                "note": note_name,
+                "frequency": note_data["frequencies"][i],
+                "note_count": note_data["count"]
+            })
 
     # Prepare the DataFrame
     groups_df = pd.DataFrame(prepare_data_frame).sort_values(by="start_time")
@@ -100,49 +86,10 @@ def json_to_time_indexed_table(json_file_path, output_csv_path, note_count_limit
     # Filter DataFrame based on note_count_limit
     groups_df = groups_df[groups_df["note_count"] > note_count_limit]
 
-    # Look for potential merges after filtering
-    merged_data = []
-    i = 0
-    while i < len(groups_df):
-        current_row = groups_df.iloc[i]
-
-        if i < len(groups_df) - 1:
-            next_row = groups_df.iloc[i + 1]
-
-            if (current_row["note"] == next_row["note"] and
-                abs(current_row["end_time"] - next_row["start_time"]) <= 0.2):
-                # Merge rows
-                total_count = current_row["note_count"] + next_row["note_count"]
-                new_avg_frequency = (
-                    current_row["average_frequency"] * current_row["note_count"] +
-                    next_row["average_frequency"] * next_row["note_count"]
-                ) / total_count
-                merged_frequencies = current_row["frequencies"] + next_row["frequencies"]
-
-                merged_row = {
-                    "start_time": current_row["start_time"],
-                    "end_time": next_row["end_time"],
-                    "note": current_row["note"],
-                    "average_frequency": new_avg_frequency,
-                    "note_count": total_count,
-                    "frequencies": merged_frequencies,
-                }
-                # Add merged row and skip next row
-                merged_data.append(merged_row)
-                i += 2
-                continue
-
-        # If no merge, add the current row
-        merged_data.append(current_row.to_dict())
-        i += 1
-
-    # Create DataFrame after merging
-    merged_df = pd.DataFrame(merged_data)
-
     # Save the final DataFrame
-    merged_df.to_csv(output_csv_path, index=False)
+    groups_df.to_csv(output_csv_path, index=False)
 
-    print(f"Final merged notes saved to {output_csv_path}")
+    print(f"Final processed notes saved to {output_csv_path}")
 
 # Example usage
 # json_to_time_indexed_table("input.json", "audio_csv.csv", note_count_limit=1)
