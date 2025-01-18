@@ -2,48 +2,52 @@ import os
 
 from intonation_app.dtw_functions import get_equal_temperament_frequencies, load_data, prepare_vectors, \
     find_optimal_transformation, shift_and_scale_audio_vectors, plot_results, map_valid_points, save_results, \
-    map_points_onto_sheet_music, parse_single_null_values_using_audio_json, interpolate_doubled_notes_with_audio_json, \
-    analyze_intonation
+    map_points_onto_sheet_music, analyze_intonation, optimize_subsets, find_largest_time_gaps
 
 
 def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports"):
     if not os.path.exists(exports_dir):
         os.makedirs(exports_dir)
 
-    # Load and prepare data
+    # region Load and prepare data
     frequencies = get_equal_temperament_frequencies()
     audio_data_df, sheet_music_df = load_data(audio_csv_path, sheet_csv_path)
     raw_audio_vectors, sheet_vectors = prepare_vectors(audio_data_df, sheet_music_df, frequencies)
 
     # Plot un-normalized data
-    #plot_results(raw_audio_vectors, sheet_vectors, title="Un-normalized Audio and Sheet Music Alignment")
+    plot_results(raw_audio_vectors, sheet_vectors, title="Un-normalized Audio and Sheet Music Alignment")
 
-    # Optimize transformation
+    # endregion
+
+    # region Set optimization parameters
     audio_duration = raw_audio_vectors[-1][0] - raw_audio_vectors[0][0]
     sheet_duration = sheet_vectors[-1][1] - sheet_vectors[0][0]
 
-    min_scale_range = min(sheet_duration / audio_duration, 0.5)
-    max_scale_range = max(sheet_duration / (audio_duration / 2), 1.5)
+    min_scale_range = 0.5
+    max_scale_range = 1.5
     shift_range = (-audio_duration, sheet_duration)
 
-    # Rough optimization
+    # endregion
+
+    # region Rough optimization
     print("Scale range:", (min_scale_range, max_scale_range), "Step:", 0.1)
     print("Shift range:", shift_range, "Step:", 5)
     transformation_results = find_optimal_transformation(
         raw_audio_vectors, sheet_vectors,
-        scale_range=(min_scale_range, max_scale_range), scale_step=0.1,
+        scale_range=(0.5, 1.5), scale_step=0.1,
         shift_range=shift_range, shift_step=1)
 
     optimal_shift = transformation_results["optimal_shift"]
     optimal_scale = transformation_results["optimal_scale"]
     best_mapping = transformation_results["best_mapping"]
-    count = transformation_results["count"]
+    unmapped_points = transformation_results["unmapped_points"]
 
-    print(f"Total calculations: {count}")
-    print(f"Optimal Shift: {round(optimal_shift, 2)}, Optimal Scale: {round(optimal_scale, 2)}")
+    print(f"Rough optimization mapped points: \033[92m{(1 - len(unmapped_points) / len(raw_audio_vectors)) * 100:.2f}%\033[0m")
+    print(f"Sheet music points: \033[92m{len(best_mapping)}\033[0m")
 
+    # endregion
 
-    # Precise optimization
+    # region Precise optimization
     print("Scale range:", (min_scale_range, max_scale_range), "Step:", 0.1)
     print("Shift range:", shift_range, "Step:", 1)
     transformation_results = find_optimal_transformation(
@@ -54,15 +58,34 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     optimal_shift = transformation_results["optimal_shift"]
     optimal_scale = transformation_results["optimal_scale"]
     best_mapping = transformation_results["best_mapping"]
-    count = transformation_results["count"]
+    unmapped_points = transformation_results["unmapped_points"]
 
-    print(f"Total calculations: {count}")
-    print(f"Optimal Shift: {round(optimal_shift, 2)}, Optimal Scale: {round(optimal_scale, 2)}")
+    print(f"Precise optimization mapped points: \033[92m{(1 - len(unmapped_points) / len(raw_audio_vectors)) * 100:.2f}%\033[0m")
+    print(f"Sheet music points: \033[92m{len(best_mapping)}\033[0m")
 
+    # endregion
 
-    # Apply optimized shift and scale
+    # region Transform vectors and plot
     transformed_audio_vectors = shift_and_scale_audio_vectors(raw_audio_vectors, shift=optimal_shift, scale=optimal_scale)
-    plot_results(transformed_audio_vectors, sheet_vectors, "Transformed audio vectors vs sheet vectors")
+    time_gaps, freq_gaps = find_largest_time_gaps(transformed_audio_vectors)
+    print("time_gaps:", time_gaps)
+    print("freq_gaps:", freq_gaps)
+    plot_results(unmapped_points, sheet_vectors, "Unmapped transformed vs sheet vectors")
+    plot_results(transformed_audio_vectors, sheet_vectors, "Transformed audio vectors vs sheet vectors", time_gaps=time_gaps, freq_gaps=freq_gaps)
+
+    # endregion
+
+    # region Optimize subsets
+    refined_audio_vectors, best_mapping, unmapped_points = optimize_subsets(transformed_audio_vectors, sheet_vectors)
+    plot_results(refined_audio_vectors, sheet_vectors, "Subset audio vectors vs sheet vectors")
+    plot_results(unmapped_points, sheet_vectors, "Unmapped subsets vs sheet vectors")
+
+    print(f"Segment mapped points: \033[92m{(1 - len(unmapped_points) / len(raw_audio_vectors)) * 100:.2f}%\033[0m")
+    print(f"Sheet music points: \033[92m{len(best_mapping)}\033[0m")
+
+
+
+    # endregion
 
     # Map vectors with octave correction
     valid_points = map_valid_points(best_mapping)
@@ -75,7 +98,7 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     adjusted_sheet_vectors = [(sheet[0], sheet[1], sheet[2]) for _, sheet in valid_points]
 
     # Plot results
-    plot_results(adjusted_audio_vectors, adjusted_sheet_vectors, "Optimized Audio and Sheet Music Alignment", valid_points)
+    plot_results(adjusted_audio_vectors, adjusted_sheet_vectors, "Mapped Valid Points", valid_points)
 
     # Map points onto sheet music
     valid_points_df = map_points_onto_sheet_music(valid_points)

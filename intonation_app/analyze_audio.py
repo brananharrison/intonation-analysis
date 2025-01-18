@@ -75,8 +75,8 @@ def audio_to_json(audio_path):
 
     # Define analysis parameters
     total_duration = n_frames / frame_rate  # Calculate total duration of audio
-    window_duration = 0.1  # seconds
-    step_size = 0.1  # seconds
+    window_duration = 0.15  # seconds
+    step_size = 0.02  # seconds
 
     # Create exports directory
     output_dir = "exports"

@@ -91,6 +91,7 @@ def map_points_onto_sheet_music(valid_points):
 
 def run_dtw(transformed_audio, trimmed_sheet):
     mapping = {}
+    unmapped_points = []
 
     # Helper function to check mapping eligibility
     def is_eligible(a_start_time, a_freq, s_start_time, s_end_time, s_freq):
@@ -103,6 +104,7 @@ def run_dtw(transformed_audio, trimmed_sheet):
 
     # Iterate over each audio note
     for a_time, a_value, _ in transformed_audio:  # Unpack note_count but ignore it
+        mapped = False
         # Iterate over each entry in the trimmed sheet
         for s_start_time, s_end_time, s_value in trimmed_sheet:
             if is_eligible(a_time, a_value, s_start_time, s_end_time, s_value):
@@ -112,21 +114,12 @@ def run_dtw(transformed_audio, trimmed_sheet):
                 if key not in mapping:
                     mapping[key] = []
                 mapping[key].append((a_time, a_value))
+                mapped = True
 
-    return mapping
+        if not mapped:
+            unmapped_points.append((a_time, a_value))
 
-
-def calculate_total_distance(transformed_audio, trimmed_sheet, path):
-    total_distance = 0
-
-    for i, j in path:
-        point_audio = transformed_audio[i]
-        point_sheet = trimmed_sheet[j]
-
-        euclidean_distance = np.sqrt((point_audio[0] - point_sheet[0]) ** 2 + (point_audio[1] - point_sheet[1]) ** 2)
-        total_distance += euclidean_distance
-
-    return total_distance
+    return mapping, unmapped_points
 
 
 def map_valid_points(mapping):
@@ -161,9 +154,6 @@ def analyze_intonation(valid_points):
     return grouped_df
 
 
-def trim_vectors(vectors, trim_start, trim_end):
-    return vectors[trim_start:len(vectors) - trim_end]
-
 def save_results(output_csv_path, valid_points):
     mapping_df = pd.DataFrame([
         {
@@ -178,42 +168,206 @@ def save_results(output_csv_path, valid_points):
     mapping_df.to_csv(output_csv_path, index=False)
 
 
-def plot_results(audio_vectors, sheet_vectors, title, valid_points=None):
+def optimize_subsets(transformed_audio_vectors, sheet_vectors):
+    segment_count = 6
+    refined_audio_vectors = []
+    combined_best_mapping = {}
+    combined_unmapped_points = []
+
+    # Get the sorted times from transformed_audio_vectors
+    times = sorted(t[0] for t in transformed_audio_vectors)
+
+    # Calculate gaps between consecutive times
+    gaps = [(times[i+1] - times[i], times[i], times[i+1]) for i in range(len(times) - 1)]
+    # Sort gaps by size in descending order
+    largest_gaps = sorted(gaps, key=lambda x: x[0], reverse=True)[:segment_count]
+
+    # Find the midpoints of the largest gaps
+    segment_boundaries = sorted([(gap[1] + gap[2]) / 2 for gap in largest_gaps])
+
+    # Add the minimum and maximum times as boundaries
+    segment_boundaries = [min(times)] + segment_boundaries + [max(times)]
+
+    # Define overlapping sheet segment boundaries
+    sheet_segment_boundaries = [
+        segment_boundaries[0] - (segment_boundaries[1] - segment_boundaries[0]) / 2
+    ] + [
+        (segment_boundaries[i] + segment_boundaries[i+1]) / 2
+        for i in range(len(segment_boundaries) - 1)
+    ] + [
+        segment_boundaries[-1] + (segment_boundaries[-1] - segment_boundaries[-2]) / 2
+    ]
+    print(sheet_segment_boundaries)
+
+    for i in range(len(segment_boundaries) - 1):
+        # Audio segment boundaries
+        segment_start = segment_boundaries[i]
+        segment_end = segment_boundaries[i + 1]
+
+        # Sheet segment boundaries with overlap
+        sheet_segment_start = sheet_segment_boundaries[i]
+        sheet_segment_end = sheet_segment_boundaries[i + 2]
+
+        # Extract segments for audio and sheet vectors
+        segment = [
+            vector for vector in transformed_audio_vectors
+            if segment_start <= vector[0] < segment_end
+        ]
+        sheet_segment = [
+            vector for vector in sheet_vectors
+            if sheet_segment_start <= vector[0] < sheet_segment_end
+        ]
+
+        if not segment or not sheet_segment:
+            continue  # Skip empty segments
+
+        # Run find_optimal_transformation with reset scale and shift
+        transformation_results = find_optimal_transformation(
+            segment,
+            sheet_segment,
+            scale_range=(0.5, 1.5),  # Reset scale range around 0
+            scale_step=0.01,
+            shift_range=(-0.2, 0.2),  # Reset shift range around 0
+            shift_step=0.025
+        )
+
+        # Extract results
+        segment_optimal_shift = transformation_results["optimal_shift"]
+        segment_optimal_scale = transformation_results["optimal_scale"]
+        segment_best_mapping = transformation_results["best_mapping"]
+        segment_unmapped_points = transformation_results["unmapped_points"]
+        print(segment_optimal_shift, segment_optimal_scale)
+
+        # Apply the optimized transformation
+        refined_segment = shift_and_scale_audio_vectors(
+            segment,
+            shift=segment_optimal_shift,
+            scale=segment_optimal_scale
+        )
+
+        # Append results
+        refined_audio_vectors.extend(refined_segment)
+        combined_unmapped_points.extend(segment_unmapped_points)
+
+        # Combine the best mapping
+        for key, value in segment_best_mapping.items():
+            if key not in combined_best_mapping:
+                combined_best_mapping[key] = value
+            else:
+                combined_best_mapping[key].extend(value)
+
+    # Ensure all mappings are combined properly
+    for key in combined_best_mapping:
+        combined_best_mapping[key] = list(set(combined_best_mapping[key]))
+
+    return refined_audio_vectors, combined_best_mapping, combined_unmapped_points
+
+
+def find_largest_time_gaps(transformed_audio_vectors):
+    # Sort the audio vectors by time for time gap calculations
+    transformed_audio_vectors.sort(key=lambda x: x[0])
+    time_gaps = []
+
+    # Calculate time gaps (sorted by time)
+    for i in range(len(transformed_audio_vectors) - 1):
+        start_time = transformed_audio_vectors[i][0]
+        end_time = transformed_audio_vectors[i + 1][0]
+        time_gap_size = end_time - start_time
+        time_midpoint = (start_time + end_time) / 2
+        time_gaps.append((time_gap_size, time_midpoint, start_time, end_time))
+
+    # Sort the audio vectors by frequency for frequency gap calculations
+    transformed_audio_vectors.sort(key=lambda x: x[1])
+    freq_gaps = []
+
+    # Calculate frequency gaps (sorted by frequency)
+    for i in range(len(transformed_audio_vectors) - 1):
+        start_freq = transformed_audio_vectors[i][1]
+        end_freq = transformed_audio_vectors[i + 1][1]
+        freq_gap_size = abs(end_freq - start_freq)
+        freq_midpoint = (start_freq + end_freq) / 2
+        freq_gaps.append((freq_gap_size, freq_midpoint, start_freq, end_freq))
+
+    # Sort the gaps in descending order by size
+    time_gaps.sort(key=lambda x: x[0], reverse=True)
+    freq_gaps.sort(key=lambda x: x[0], reverse=True)
+
+    # Process time gaps
+    largest_time_midpoints = []
+    blacklisted_time_intervals = []
+
+    for gap in time_gaps:
+        gap_size, midpoint, start_time, end_time = gap
+        if gap_size > 0.02 and all(
+            end_time <= start or start_time >= end
+            for start, end in blacklisted_time_intervals
+        ):
+            largest_time_midpoints.append(round(midpoint, 2))
+            blacklisted_time_intervals.append((start_time, end_time))
+
+    # Process frequency gaps
+    largest_freq_midpoints = []
+    blacklisted_freq_intervals = []
+
+    for gap in freq_gaps:
+        gap_size, midpoint, start_freq, end_freq = gap
+        if gap_size > 0.035 * start_freq and all(
+            end_freq <= start or start_freq >= end
+            for start, end in blacklisted_freq_intervals
+        ):
+            largest_freq_midpoints.append(round(midpoint, 2))
+            blacklisted_freq_intervals.append((min(start_freq, end_freq), max(start_freq, end_freq)))
+
+    # Print the results
+    print("Time Gaps:")
+    for gap in largest_time_midpoints:
+        print(f"Time Midpoint: {gap}")
+
+    print("Frequency Gaps:")
+    for gap in largest_freq_midpoints:
+        print(f"Frequency Midpoint: {gap}")
+
+    return sorted(largest_time_midpoints), sorted(largest_freq_midpoints)
+
+
+def plot_results(audio_vectors, sheet_vectors, title, valid_points=None, time_gaps=None, freq_gaps=None):
     plt.figure(figsize=(12, 8))
 
-    # Plot straight lines for each tuple in sheet_vectors
     for i, (start_time, end_time, frequency) in enumerate(sheet_vectors):
         plt.plot([start_time, end_time], [frequency, frequency], color='cornflowerblue',
                  label='Sheet Music Frequencies' if i == 0 else "")
-        # Add a vertical divider at the start and end of each interval
         plt.plot([start_time, start_time], [frequency - 10, frequency + 10], color='blue', linestyle=':', linewidth=1,
                  label='Interval Start' if i == 0 else "")
         plt.plot([end_time, end_time], [frequency - 10, frequency + 10], color='orange', linestyle=':', linewidth=1,
                  label='Interval End' if i == 0 else "")
 
-    # Extract times and frequencies for audio vectors dynamically
     try:
-        # Assuming the presence of `note_count`
         audio_times = [start for start, _, _ in audio_vectors]
         audio_freqs = [freq for _, freq, _ in audio_vectors]
     except ValueError:
-        # Fallback for vectors without `note_count`
         audio_times = [start for start, _ in audio_vectors]
         audio_freqs = [freq for _, freq in audio_vectors]
 
-    # Plot individual points for audio frequencies
     plt.scatter(audio_times, audio_freqs, label='Audio Frequencies', color='lightcoral', marker='.')
 
-    # Plot valid points if provided
     if valid_points:
         for (audio_time, audio_freq), (sheet_start_time, sheet_end_time, sheet_freq) in valid_points:
-            # Map audio_time to the nearest point on the sheet interval
             closest_sheet_time = max(min(audio_time, sheet_end_time), sheet_start_time)
-
             plt.plot([audio_time, closest_sheet_time], [audio_freq, sheet_freq], color='green', linestyle='--',
                      linewidth=2)
 
-    # Add title and labels
+    if time_gaps:
+        for gap_time in time_gaps:
+            plt.axvline(x=gap_time, color='black', linestyle=':', linewidth=1,
+                        label='Time Gap' if gap_time == time_gaps[0] else "")
+
+    if freq_gaps:
+        freq_gap_legend_added = False
+        for gap_freq in freq_gaps:
+            plt.axhline(y=gap_freq, color='purple', linestyle='--', linewidth=1,
+                        label='Freq Gap' if not freq_gap_legend_added else "")
+            freq_gap_legend_added = True
+
     plt.title(title)
     plt.xlabel('Time (s)')
     plt.ylabel('Frequency (Hz)')
@@ -221,11 +375,6 @@ def plot_results(audio_vectors, sheet_vectors, title, valid_points=None):
     plt.grid()
     plt.show()
 
-
-def apply_trimming(sheet_vectors, audio_vectors, audio_start_trim, audio_end_trim, sheet_start_trim, sheet_end_trim):
-    trimmed_sheet = trim_vectors(sheet_vectors, sheet_start_trim, sheet_end_trim)
-    trimmed_audio = trim_vectors(audio_vectors, audio_start_trim, audio_end_trim)
-    return trimmed_sheet, trimmed_audio
 
 def calculate_dynamic_ranges(audio_vectors, sheet_vectors):
     audio_duration = max([time for time, _ in audio_vectors]) - min([time for time, _ in audio_vectors])
@@ -246,16 +395,17 @@ def find_optimal_transformation(audio_vectors, sheet_vectors,
     optimal_scale = 1
     best_match_count = 0
     best_mapping = {}
+    best_unmapped_points = []
 
     count = 0
 
     def calculate_match_count(mapping):
-        return sum(len(v) for v in mapping.values())  # Count total matches from the dictionary
+        return sum(len(v) for v in mapping.values()) + sum(5 for _ in mapping)
 
     for shift in np.arange(shift_range[0], shift_range[1] + shift_step, shift_step):
         for scale in np.arange(scale_range[0], scale_range[1] + scale_step, scale_step):
             transformed_audio = shift_and_scale_audio_vectors(audio_vectors, shift=shift, scale=scale)
-            mapping = run_dtw(transformed_audio, sheet_vectors)
+            mapping, unmapped_points = run_dtw(transformed_audio, sheet_vectors)
             match_count = calculate_match_count(mapping)
 
             # Total calculations count
@@ -263,11 +413,11 @@ def find_optimal_transformation(audio_vectors, sheet_vectors,
 
             # Prioritize higher match count, and then lower total distance
             if match_count > best_match_count:
-                print(f"Shift: {shift}, Scale: {scale}, Matched Points: {match_count}")
                 best_match_count = match_count
                 optimal_shift = shift
                 optimal_scale = scale
                 best_mapping = mapping
+                best_unmapped_points = unmapped_points
 
     # Final Results
     return {
@@ -275,189 +425,7 @@ def find_optimal_transformation(audio_vectors, sheet_vectors,
         "optimal_scale": optimal_scale,
         "best_mapping": best_mapping,
         "best_match_count": best_match_count,
+        "unmapped_points": best_unmapped_points,
         "count": count
     }
 
-
-def interpolate_doubled_notes_with_audio_json(result_df, optimal_shift, optimal_scale, audio_json_path, audio_csv_path):
-    # Load audio_json
-    with open(audio_json_path, 'r') as f:
-        audio_json = json.load(f)
-
-    # Convert audio_json to a DataFrame for efficient processing
-    audio_data = pd.DataFrame(audio_json)
-
-    # Load audio_csv
-    audio_csv = pd.read_csv(audio_csv_path)
-    audio_csv['frequencies'] = audio_csv['frequencies'].apply(eval)  # Convert string lists to actual lists
-
-    def get_average_frequency_from_csv(proportion_bounds, matched_row):
-        """
-        Calculate the average frequency within the bounds defined by proportions for the matched row.
-        Uses the 'frequencies' column of the matched_row, which contains a list of frequencies.
-        """
-        # Extract the frequencies from the matched row
-        frequencies = matched_row['frequencies']
-
-        # Calculate the subset indices based on the proportion bounds
-        total_frequencies = len(frequencies)
-        start_index = int(proportion_bounds[0] * total_frequencies)
-        end_index = int(proportion_bounds[1] * total_frequencies)
-
-        # Ensure end_index is inclusive and errs on the side of oversampling
-        end_index = min(end_index + 1, total_frequencies)
-
-        # Select the subset of frequencies
-        subset_frequencies = frequencies[start_index:end_index]
-
-        # Calculate and return the average of the subset frequencies
-        if subset_frequencies:
-            return np.mean(subset_frequencies)
-        return np.nan
-
-    # Group by 'Audio Frequency (Hz)'
-    result = []
-    for freq, group in result_df.groupby(
-            (result_df['audio_frequency'] != result_df['audio_frequency'].shift()).cumsum()):
-        if len(group) > 1 and group['audio_frequency'].nunique() == 1:
-            # Determine bounds for the group
-            min_time = group['sheet_time'].min()
-            if group.index[-1] + 1 in result_df.index:
-                next_group_start_time = result_df.loc[group.index[-1] + 1, 'sheet_time']
-            else:
-                next_group_start_time = group['sheet_time'].iloc[-1] + 1
-
-            # Prepare next_note_start_time for each note in the group
-            group = group.sort_values('sheet_time').reset_index(drop=True)
-            group['next_note_start_time'] = group['sheet_time'].shift(-1).fillna(next_group_start_time)
-
-            # Add min_time and next_group_start_time to each row in the group
-            group['min_time'] = group['sheet_time'].apply(lambda x: min_time)
-            group['next_group_start_time'] = group['sheet_time'].apply(lambda x: next_group_start_time)
-
-            # Calculate individual bounds for each row using min_time and next_note_start_time
-            group['bounds_start'] = (group['sheet_time'] - min_time) / (next_group_start_time - min_time)
-            group['bounds_end'] = (group['next_note_start_time'] - min_time) / (next_group_start_time - min_time)
-
-            # Reverse-transform using optimal_shift and optimal_scale for each row
-            group['estimated_start_time'] = group['bounds_start'] * optimal_scale + optimal_shift
-            group['estimated_end_time'] = group['bounds_end'] * optimal_scale + optimal_shift
-
-            # Match to audio_csv based on estimated time
-            subset_average_frequency_list = []
-            for _, row in group.iterrows():
-                matched_row = audio_csv[
-                    (audio_csv['average_frequency'].round(2) == row['audio_frequency'].round(2))
-                ]
-                if not matched_row.empty:
-                    # Take the closest row based on estimated_start_time
-                    matched_row = matched_row.iloc[
-                        np.argmin(abs(matched_row['start_time'] - row['estimated_start_time']))
-                    ]
-
-                    # Define proportion bounds for subset
-                    proportion_bounds = [row['bounds_start'], row['bounds_end']]
-
-                    # Calculate the average frequency using the proportion bounds
-                    avg_frequency = get_average_frequency_from_csv(
-                        proportion_bounds,
-                        matched_row
-                    )
-
-                    # If avg_frequency is NaN, fall back to row's original audio_frequency
-                    subset_average_frequency_list.append(
-                        avg_frequency if not pd.isna(avg_frequency) else row['audio_frequency']
-                    )
-                else:
-                    # If no match, keep the original audio_frequency
-                    subset_average_frequency_list.append(row['audio_frequency'])
-
-            # Assign calculated average frequencies to the group
-            group['audio_frequency'] = subset_average_frequency_list
-
-            result.append(group)
-        else:
-            # Append single entries without modification
-            result.append(group)
-
-    # Concatenate all processed groups
-    updated_df = pd.concat(result, ignore_index=True).sort_values(by='sheet_time')
-
-    # Remove additional columns created during processing
-    columns_to_remove = ['next_note_start_time', 'min_time', 'next_group_start_time',
-                         'bounds_start', 'bounds_end', 'estimated_start_time', 'estimated_end_time']
-    updated_df = updated_df.drop(columns=columns_to_remove, errors='ignore')
-
-    return updated_df
-
-
-def parse_single_null_values_using_audio_json(df, audio_json_path, optimal_shift, optimal_scale):
-    # Load the audio JSON file
-    with open(audio_json_path, 'r') as f:
-        audio_data = json.load(f)
-
-    # Check for null rows
-    null_rows = df[df['audio_time'].isnull() | df['audio_frequency'].isnull()]
-
-    if null_rows.empty:
-        return df  # No null rows, return as is
-
-    # Iterate over null rows
-    for index, row in null_rows.iterrows():
-        sheet_frequency = row['sheet_frequency']
-
-        # Find boundaries from the nearest non-null rows above and below
-        above_rows = df.iloc[:index].dropna(subset=['audio_time', 'audio_frequency'])
-        if index + 1 < len(df):
-            below_rows = df.iloc[index + 1:]
-            if 'audio_time' in below_rows.columns and 'audio_frequency' in below_rows.columns:
-                below_rows = below_rows.dropna(subset=['audio_time', 'audio_frequency'])
-            else:
-                below_rows = pd.DataFrame()
-        else:
-            below_rows = pd.DataFrame()
-
-        if above_rows.empty or below_rows.empty:
-            # If no valid rows above or below, skip this row
-            df = df.drop(index)
-            continue
-
-        above_row = above_rows.iloc[-1]
-        below_row = below_rows.iloc[0]
-
-        above_time = above_row['audio_time']
-        below_time = below_row['audio_time']
-
-        # Undo transformation for boundaries
-        original_bounds = [
-            (above_time - optimal_shift) / optimal_scale,
-            (below_time - optimal_shift) / optimal_scale
-        ]
-
-        # Filter audio data within the boundaries
-        filtered_audio_data = [
-            entry for entry in audio_data if original_bounds[0] <= entry['start_time'] <= original_bounds[1]
-        ]
-
-        candidates = []
-        for entry in filtered_audio_data:
-            for freq in entry['frequency']:
-                if abs(freq - sheet_frequency) / sheet_frequency <= 0.052:
-                    candidates.append((freq, entry['start_time']))
-
-        if not candidates:
-            # Remove row if no matching frequency is found
-            df = df.drop(index)
-        else:
-            # Average the matching frequencies and times
-            matching_frequencies = [freq for freq, _ in candidates]
-            matching_times = [time for _, time in candidates]
-
-            avg_frequency = np.mean(matching_frequencies)
-            avg_time = np.mean(matching_times)
-
-            # Update the DataFrame
-            df.at[index, 'audio_frequency'] = round(avg_frequency, 4)
-            df.at[index, 'audio_time'] = (avg_time + optimal_shift) * optimal_scale
-
-    return df

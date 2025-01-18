@@ -33,7 +33,7 @@ def annotate_sheet_music(musicxml_file, csv_file_path):
                         intonation_map[offset] = []
                     intonation_map[offset].append((expected_freq, deviation))
             except ValueError:
-                print(f"Skipping row due to invalid data: {row}")
+                pass
 
     def calculate_global_offset(element):
         total_offset = element.offset
@@ -44,35 +44,25 @@ def annotate_sheet_music(musicxml_file, csv_file_path):
         return round(total_offset, 2)
 
     for part in score.parts:
-        print(f"Processing part: {part.id}")
         for n in part.recurse().notes:
-            print(f"Processing element: {n}, Type: {type(n)}")
             offset = calculate_global_offset(n)
-            print(f"Offset: {offset}")
 
             if offset in intonation_map:
-                print(f"Intonation matches found for offset {offset}")
-                # Sort by frequency for stacking
                 matches = sorted(
                     intonation_map[offset],
                     key=lambda freq_dev: freq_dev[0],
                     reverse=True  # Higher frequencies appear first
                 )
-                print(f"Matches: {matches}")
 
                 # Annotate each note or chord
                 n.lyrics = []  # Clear existing lyrics
                 if isinstance(n, note.Note):
-                    print(f"Processing Note: {n.nameWithOctave}")
                     pitch_freq = n.pitch.frequency
-                    print(f"Note frequency: {pitch_freq}")
                     for idx, (expected_freq, deviation) in enumerate(matches):
                         if abs(pitch_freq - expected_freq) > 5:  # Frequency tolerance
-                            print(f"Skipping match {idx}: {pitch_freq} vs {expected_freq}")
                             continue
                         annotation = f"{deviation:.1f}"
-                        print(f"Adding annotation: {annotation}")
-                        n.addLyric(annotation)
+                        n.addLyric(annotation, applyRaw=True)
                         lyric = n.lyrics[-1]
 
                         # Adjust vertical stacking
@@ -84,20 +74,15 @@ def annotate_sheet_music(musicxml_file, csv_file_path):
 
                         # Color styling based on deviation
                         lyric.style.color = '#FF6666' if abs(deviation) > 5 else 'green'
-                        print(f"Annotation added: {annotation}, relativeY: {lyric.style.relativeY}")
 
                 elif isinstance(n, chord.Chord):
-                    print(f"Processing Chord: {n.pitchedCommonName}")
                     for pitch in n.pitches:
                         pitch_freq = pitch.frequency
-                        print(f"Pitch: {pitch.nameWithOctave}, Frequency: {pitch_freq}")
                         for idx, (expected_freq, deviation) in enumerate(matches):
                             if abs(pitch_freq - expected_freq) > 5:  # Frequency tolerance
-                                print(f"Skipping match {idx}: {pitch_freq} vs {expected_freq}")
                                 continue
                             annotation = f"{deviation:.1f}"
-                            print(f"Adding annotation: {annotation} to pitch: {pitch.nameWithOctave}")
-                            n.addLyric(annotation)
+                            n.addLyric(annotation, applyRaw=True)
                             lyric = n.lyrics[-1]
 
                             # Adjust vertical stacking
@@ -109,12 +94,10 @@ def annotate_sheet_music(musicxml_file, csv_file_path):
 
                             # Color styling based on deviation
                             lyric.style.color = '#FF6666' if abs(deviation) > 5 else 'green'
-                            print(f"Annotation added: {annotation}, relativeY: {lyric.style.relativeY}")
 
     # Save annotated MusicXML file
     annotated_file = os.path.join(musescore_dir, 'annotated.xml')
     score.write('musicxml', fp=annotated_file)
-    print(f"Annotated MusicXML saved to {annotated_file}")
 
     # Generate PNGs using MuseScore
     score.write('musicxml.png', fp=os.path.join(musescore_dir, 'annotated'))
@@ -129,8 +112,5 @@ def annotate_sheet_music(musicxml_file, csv_file_path):
     output_pdf = os.path.join(exports_dir, 'annotated_sheet_music_combined.pdf')
     image_with_margins[0].save(output_pdf, save_all=True, append_images=image_with_margins[1:])
 
-    print(f"Combined PDF saved to {output_pdf}")
-
     # Cleanup
     #shutil.rmtree(musescore_dir)
-    #print(f"Temporary directory {musescore_dir} deleted.")
