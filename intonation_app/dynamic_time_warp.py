@@ -15,7 +15,7 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     raw_audio_vectors, sheet_vectors = prepare_vectors(audio_data_df, sheet_music_df, frequencies)
 
     # Plot un-normalized data
-    #plot_results(raw_audio_vectors, sheet_vectors, title="Un-normalized Audio and Sheet Music Alignment")
+    plot_results(raw_audio_vectors, sheet_vectors, title="Un-normalized Audio and Sheet Music Alignment")
 
     # endregion
 
@@ -70,7 +70,9 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     gaps = find_gaps(transformed_audio_vectors)
 
     #plot_results(unmapped_points, sheet_vectors, "Unmapped transformed vs sheet vectors")
+    plot_results(transformed_audio_vectors, sheet_vectors, "Plot without gaps", valid_points=None)
     plot_results(transformed_audio_vectors, sheet_vectors, "Plot with gaps", valid_points=None, gaps=gaps)
+
 
     summary = summarize_gaps(gaps, transformed_audio_vectors)
 
@@ -78,10 +80,13 @@ def map_frequency_vectors(audio_csv_path, sheet_csv_path, exports_dir="exports")
     plot_results(refined_audio_vectors, sheet_vectors, "Subset audio vectors vs sheet vectors")
 
     mapping, unmapped_points = run_dtw(refined_audio_vectors, sheet_vectors)
-
-    #plot_results(unmapped_points, sheet_vectors, "Unmapped subsets vs sheet vectors")
+    print(
+        f"Subset optimization mapped points: \033[92m{(1 - len(unmapped_points) / len(raw_audio_vectors)) * 100:.2f}%\033[0m")
+    print(f"Sheet music points: \033[92m{len(best_mapping)}\033[0m")
+    plot_results(unmapped_points, sheet_vectors, "Unmapped subsets vs sheet vectors")
 
     # endregion
+
 
     # Map vectors with octave correction
     valid_points = map_valid_points(mapping)

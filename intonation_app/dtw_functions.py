@@ -97,7 +97,7 @@ def run_dtw(transformed_audio, trimmed_sheet):
     # Helper function to check mapping eligibility
     def is_eligible(a_start_time, a_freq, s_start_time, s_end_time, s_freq):
         # Check if the audio note's start time falls within the sheet's time range
-        if not (s_start_time <= a_start_time < s_end_time):
+        if not (s_start_time <= a_start_time <= s_end_time):
             return False
         # Check if the frequency difference is within the allowed threshold
         freq_diff = abs(a_freq - s_freq) / max(a_freq, s_freq)
@@ -116,6 +116,7 @@ def run_dtw(transformed_audio, trimmed_sheet):
                     mapping[key] = []
                 mapping[key].append((a_time, a_value))
                 mapped = True
+                continue
 
         if not mapped:
             unmapped_points.append((a_time, a_value))
@@ -172,6 +173,16 @@ def save_results(output_csv_path, valid_points):
 def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
 
     def adjust_vectors(sheet_start, sheet_end, summary_start, summary_end, transformed_audio_vectors):
+        updated_vectors = []
+
+        shift_amount = sheet_start - summary_start
+        scale_amount = (sheet_end - sheet_start) / (summary_end - summary_start)
+
+        for time, frequency in transformed_audio_vectors:
+            if summary_start <= time <= summary_end:
+                new_time = (time - summary_start) * scale_amount + sheet_start
+                updated_vectors.append((round(new_time, 4), frequency))
+
         # Remove points within the original summary interval
         remaining_vectors = [point for point in transformed_audio_vectors if not (summary_start <= point[0] <= summary_end)]
 
@@ -183,16 +194,6 @@ def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
         left_max = max(left_vectors, key=lambda x: x[0])[0] if left_vectors else summary_start
         right_min = min(right_vectors, key=lambda x: x[0])[0] if right_vectors else summary_end
         right_max = max(right_vectors, key=lambda x: x[0])[0] if right_vectors else summary_end
-
-        updated_vectors = []
-
-        shift_amount = sheet_start - summary_start
-        scale_amount = (sheet_end - sheet_start) / (summary_end - summary_start)
-
-        for time, frequency in transformed_audio_vectors:
-            if summary_start <= time <= summary_end:
-                new_time = (time - summary_start) * scale_amount + sheet_start
-                updated_vectors.append((round(new_time, 4), frequency))
 
         # Adjust the left and right vectors while keeping left_min and right_max anchored
         refined_vectors = []
@@ -247,7 +248,7 @@ def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
     sheet_start_2 = 3.5  # (3.5, 4.0, 349.23)
     sheet_end_2 = 4.5  # (4.0, 4.5, 349.23)
 
-    summary_start_2 = 3.3747411444141693
+    summary_start_2 = 3.3747
     summary_end_2 = 4.058
 
     # Generate remaining and locked vectors using transformed intervals
@@ -354,7 +355,9 @@ def summarize_gaps(gap_dict, transformed_audio_vectors):
                 min_time = round(float(min(v[0] for v in vectors_in_box)), 4)
                 max_time = round(float(max(v[0] for v in vectors_in_box)), 4)
                 avg_frequency = round(float(sum(v[1] for v in vectors_in_box) / len(vectors_in_box)), 4)
-                summaries.append((min_time, max_time, avg_frequency))
+                num_points = len(vectors_in_box)
+                freq_bounds = (freq_start, freq_end)
+                summaries.append((min_time, max_time, avg_frequency, num_points, freq_bounds))
 
     return sorted(summaries, key=lambda x: (x[0], x[1]))
 
