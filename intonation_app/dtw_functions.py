@@ -2,8 +2,8 @@ import os
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import json
 from scipy.signal import find_peaks
+from collections import defaultdict
 
 
 def get_equal_temperament_frequencies():
@@ -170,21 +170,34 @@ def save_results(output_csv_path, valid_points):
     mapping_df.to_csv(output_csv_path, index=False)
 
 
-def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
-
-    def adjust_vectors(sheet_start, sheet_end, summary_start, summary_end, transformed_audio_vectors):
+def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary, rounds=10):
+    def adjust_vectors(sheet_start, sheet_end, summary_start, summary_end, transformed_audio_vectors, summary):
         updated_vectors = []
+        updated_summary = []
 
         shift_amount = sheet_start - summary_start
         scale_amount = (sheet_end - sheet_start) / (summary_end - summary_start)
 
+        # Create a mapping to track where summary start and end points are mapped
+        mapping = {}
+
+        # Adjust audio vectors and track mappings for any start or end in the summary
         for time, frequency in transformed_audio_vectors:
             if summary_start <= time <= summary_end:
-                new_time = (time - summary_start) * scale_amount + sheet_start
+                new_time = round((time - summary_start) * scale_amount + sheet_start, 4)
                 updated_vectors.append((round(new_time, 4), frequency))
 
+                # Check if time corresponds to any start or end in summary
+                for i in range(len(summary)):
+                    s_start, s_end, s_freq, s_num, freq_bin = summary[i]
+                    if time == s_start:
+                        summary[i] = (new_time, s_end, s_freq, s_num, freq_bin)
+                    elif time == s_end:
+                        summary[i] = (s_start, new_time, s_freq, s_num, freq_bin)
+
         # Remove points within the original summary interval
-        remaining_vectors = [point for point in transformed_audio_vectors if not (summary_start <= point[0] <= summary_end)]
+        remaining_vectors = [point for point in transformed_audio_vectors if
+                             not (summary_start <= point[0] <= summary_end)]
 
         # Calculate left and right bounds
         left_vectors = [point for point in remaining_vectors if point[0] < summary_start]
@@ -202,11 +215,29 @@ def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
             if time < summary_start:
                 scale = (summary_start - left_min) / (left_max - left_min) if left_max != left_min else 1
                 shift = left_min - left_min * scale
-                new_time = time * scale + shift
+                new_time = round(time * scale + shift, 4)
+
+                # Update mapping if time matches a summary start or end
+                for i in range(len(summary)):
+                    s_start, s_end, s_freq, s_num, freq_bin = summary[i]
+                    if time == s_start:
+                        summary[i] = (new_time, s_end, s_freq, s_num, freq_bin)
+                    elif time == s_end:
+                        summary[i] = (s_start, new_time, s_freq, s_num, freq_bin)
+
             elif time > summary_end:
                 scale = (right_max - sheet_end) / (right_max - right_min) if right_max != right_min else 1
                 shift = right_max - right_max * scale
-                new_time = time * scale + shift
+                new_time = round(time * scale + shift, 4)
+
+                # Update mapping if time matches a summary start or end
+                for i in range(len(summary)):
+                    s_start, s_end, s_freq, s_num, freq_bin = summary[i]
+                    if time == s_start:
+                        summary[i] = (new_time, s_end, s_freq, s_num, freq_bin)
+                    elif time == s_end:
+                        summary[i] = (s_start, new_time, s_freq, s_num, freq_bin)
+
             else:
                 continue  # This should not happen; handled by the earlier filtering
             refined_vectors.append((round(new_time, 4), frequency))
@@ -215,7 +246,7 @@ def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
         combined_vectors = updated_vectors + refined_vectors
         combined_vectors.sort(key=lambda x: x[0])  # Ensure time order
 
-        return combined_vectors
+        return combined_vectors, summary
 
     def generate_remaining_vectors(transformed_audio_vectors, transformed_intervals, summary_start, summary_end):
         remaining_vectors = []
@@ -229,39 +260,171 @@ def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
                 locked_vectors.append(point)
         return remaining_vectors, locked_vectors
 
-    # Initialize transformed intervals list
+    def find_best_transform(summary, sheet_vectors):
+        # Group sheet_vectors by frequency
+        freq_groups = defaultdict(list)
+        for v_start, v_end, v_freq in sheet_vectors:
+            freq_groups[v_freq].append((v_start, v_end))
+
+        # Generate valid combinations and update sheet_vectors
+        new_sheet_vectors = []
+        combination_to_singles = {}
+        for v_freq, intervals in freq_groups.items():
+            # Sort intervals by start time
+            intervals.sort()
+
+            # Generate valid combinations
+            combined_intervals = []
+            current_combination = [intervals[0]]
+            for i in range(1, len(intervals)):
+                prev_start, prev_end = current_combination[-1]
+                curr_start, curr_end = intervals[i]
+
+                if prev_end == curr_start:  # Valid combination
+                    current_combination.append(intervals[i])
+                else:
+                    if len(current_combination) > 1:
+                        combined_intervals.append(current_combination)
+                    current_combination = [intervals[i]]
+
+            if len(current_combination) > 1:
+                combined_intervals.append(current_combination)
+
+            # Add combinations to new_sheet_vectors
+            for combination in combined_intervals:
+                combined_start = combination[0][0]
+                combined_end = combination[-1][1]
+                new_sheet_vectors.append((combined_start, combined_end, v_freq))
+                combination_to_singles[(combined_start, combined_end, v_freq)] = set(combination)
+
+            # Add singles to new_sheet_vectors
+            for single in intervals:
+                new_sheet_vectors.append((*single, v_freq))
+
+        results = []
+
+        # Main processing loop
+        for s_start, s_end, s_freq, s_num, (freq_min, freq_max) in summary:
+            # Filter sheet_vectors for frequencies within the bin
+            matching_vectors = [
+                (v_start, v_end, v_freq) for v_start, v_end, v_freq in new_sheet_vectors
+                if freq_min <= v_freq <= freq_max
+            ]
+
+            # Calculate summary_length
+            summary_length = s_end - s_start
+
+            closest_vector = None
+            closest_distance = float('inf')
+            overlaps_with_another_sheet_music_interval = False
+            closest_ratio = None
+            closest_proportion = None
+            is_combination = False
+
+            for v_start, v_end, v_freq in matching_vectors:
+                sheet_vector_length = v_end - v_start
+                ratio = summary_length / sheet_vector_length
+
+                if 0.7 <= ratio <= 1.3:
+                    midpoint_diff = abs(((v_start + v_end) / 2) - ((s_start + s_end) / 2))
+
+                    if midpoint_diff < closest_distance:
+                        closest_distance = midpoint_diff
+                        closest_vector = (v_start, v_end, v_freq)
+                        closest_ratio = ratio
+
+            if closest_vector:
+                # Calculate intersection proportion
+                v_start, v_end, v_freq = closest_vector
+                intersection_start = max(s_start, v_start)
+                intersection_end = min(s_end, v_end)
+                intersection_length = max(0, intersection_end - intersection_start)
+                closest_proportion = intersection_length / summary_length
+
+                # Determine if the closest vector is a combination
+                is_combination = closest_vector in combination_to_singles
+
+                # Check for overlaps with other intervals
+                closest_singles = combination_to_singles.get(closest_vector, set())
+                for other_v_start, other_v_end, _ in matching_vectors:
+                    if (other_v_start, other_v_end) != (v_start, v_end):
+                        if (other_v_start, other_v_end) not in closest_singles:
+                            other_intersection_start = max(s_start, other_v_start)
+                            other_intersection_end = min(s_end, other_v_end)
+                            if other_intersection_end > other_intersection_start:
+                                overlaps_with_another_sheet_music_interval = True
+                                break
+
+                results.append((
+                    s_start, s_end, v_start, v_end, closest_ratio, overlaps_with_another_sheet_music_interval,
+                    is_combination, s_num
+                ))
+
+        # Filter results
+        filtered_results = [
+            r for r in results if not r[5] and (not r[6] or (0.9 <= r[4] <= 1.1))
+        ]
+
+        # Sort by s_num (index 7) greatest to least
+        filtered_results.sort(key=lambda x: x[7], reverse=True)
+
+        # Return the best result
+        if filtered_results:
+            best_result = filtered_results[0]
+            return best_result[0], best_result[1], best_result[2], best_result[3]
+        else:
+            return None
+
+    def process_transformation(current_summary, intervals, transformed_vectors):
+        """
+        Runs a single transformation iteration.
+        """
+        result = find_best_transform(current_summary, sheet_vectors)
+        if not result:
+            raise ValueError("No valid transformation found.")
+
+        summary_start, summary_end, sheet_start, sheet_end = result
+        print(
+            f"Transformation: Summary Start={summary_start}, Summary End={summary_end}, Sheet Start={sheet_start}, Sheet End={sheet_end}")
+
+        # Adjust vectors based on the transformation
+        updated_transformed_vectors, updated_summary = adjust_vectors(
+            sheet_start, sheet_end, summary_start, summary_end, transformed_vectors, current_summary
+        )
+
+        # Update summary by excluding intervals used in this transformation
+        updated_summary = [
+            s for s in updated_summary
+            if not (s[0] < summary_end and s[1] > summary_start)
+        ]
+
+        # Add the interval to transformed intervals
+        intervals.append((sheet_start, sheet_end))
+
+        return updated_summary, updated_transformed_vectors, intervals
+
     transformed_intervals = []
+    current_summary = summary
+    current_transformed_vectors = transformed_audio_vectors
 
-    # Extract the relevant summary and sheet vectors
-    summary_tuple_1 = summary[1]  # (0.616, 1.504, 329.535)
-    sheet_tuple_1 = sheet_vectors[1]  # (0.0, 1.0, 329.63)
+    for i in range(rounds):
+        print(f"Running transformation round {i + 1}...")
+        try:
+            current_summary, current_transformed_vectors, transformed_intervals = process_transformation(
+                current_summary, transformed_intervals, current_transformed_vectors
+            )
+        except ValueError as e:
+            print(f"No more valid transformations available at round {i + 1}: {e}")
+            break
 
-    summary_start_1, summary_end_1, _ = summary_tuple_1
-    sheet_start_1, sheet_end_1, _ = sheet_tuple_1
-
-    # First transformation
-    transformed_vectors_1 = adjust_vectors(sheet_start_1, sheet_end_1, summary_start_1, summary_end_1, transformed_audio_vectors)
-    transformed_intervals.append((sheet_start_1, sheet_end_1))
-
-    # Extract the second summary and sheet intervals
-    summary_tuple_2 = summary[17]  # (3.402, 4.058, 346.047)
-    sheet_start_2 = 3.5  # (3.5, 4.0, 349.23)
-    sheet_end_2 = 4.5  # (4.0, 4.5, 349.23)
-
-    summary_start_2 = 3.3747
-    summary_end_2 = 4.058
-
-    # Generate remaining and locked vectors using transformed intervals
+        # Generate remaining vectors and combine with locked vectors
     remaining_vectors, locked_vectors = generate_remaining_vectors(
-        transformed_vectors_1, transformed_intervals, summary_start_2, summary_end_2
+        current_transformed_vectors, transformed_intervals, transformed_intervals[-1][0],
+        transformed_intervals[-1][1] if transformed_intervals else current_transformed_vectors[-1][0]
     )
 
-    # Second transformation using the selected remaining vectors
-    transformed_vectors_2 = adjust_vectors(sheet_start_2, sheet_end_2, summary_start_2, summary_end_2, remaining_vectors)
-    transformed_intervals.append((sheet_start_2, sheet_end_2))
-
-    # Combine locked vectors with the second transformed vectors
-    final_transformed_vectors = transformed_vectors_2 + locked_vectors
+    # Combine the final vectors
+    final_transformed_vectors = current_transformed_vectors + locked_vectors
     final_transformed_vectors.sort(key=lambda x: x[0])  # Ensure time order
 
     return final_transformed_vectors
