@@ -18,6 +18,7 @@ simpleaudio = "^1.0.4"
 eventlet = "^0.38.2"
 flask = "^3.1.0"
 flask-socketio = "^5.5.0"
+scikit-learn = "^1.6.1"
 
 
 [build-system]

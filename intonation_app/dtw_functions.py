@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+from scipy.signal import find_peaks
 
 
 def get_equal_temperament_frequencies():
@@ -41,7 +42,7 @@ def load_data(audio_csv_path, sheet_csv_path):
 
 def prepare_vectors(audio_data_df, sheet_music_df, frequencies):
     audio_vectors = [
-        (row['start_time'], round(row['frequency'], 4), row['note_count'])
+        (row['start_time'], round(row['frequency'], 4))
         for _, row in audio_data_df.iterrows()
     ]
     sheet_vectors = [
@@ -52,7 +53,7 @@ def prepare_vectors(audio_data_df, sheet_music_df, frequencies):
 
 
 def shift_and_scale_audio_vectors(audio_vectors, shift=0.0, scale=1.0):
-    return [(start * scale + shift, freq, note_count) for start, freq, note_count in audio_vectors]
+    return [(round(start * scale + shift, 3), round(freq, 4)) for start, freq in audio_vectors]
 
 
 def map_points_onto_sheet_music(valid_points):
@@ -103,7 +104,7 @@ def run_dtw(transformed_audio, trimmed_sheet):
         return freq_diff <= 0.045
 
     # Iterate over each audio note
-    for a_time, a_value, _ in transformed_audio:  # Unpack note_count but ignore it
+    for a_time, a_value in transformed_audio:  # Unpack note_count but ignore it
         mapped = False
         # Iterate over each entry in the trimmed sheet
         for s_start_time, s_end_time, s_value in trimmed_sheet:
@@ -168,170 +169,198 @@ def save_results(output_csv_path, valid_points):
     mapping_df.to_csv(output_csv_path, index=False)
 
 
-def optimize_subsets(transformed_audio_vectors, sheet_vectors):
-    segment_count = 6
-    refined_audio_vectors = []
-    combined_best_mapping = {}
-    combined_unmapped_points = []
+def optimize_subsets(transformed_audio_vectors, sheet_vectors, summary):
 
-    # Get the sorted times from transformed_audio_vectors
-    times = sorted(t[0] for t in transformed_audio_vectors)
+    def adjust_vectors(sheet_start, sheet_end, summary_start, summary_end, transformed_audio_vectors):
+        # Remove points within the original summary interval
+        remaining_vectors = [point for point in transformed_audio_vectors if not (summary_start <= point[0] <= summary_end)]
 
-    # Calculate gaps between consecutive times
-    gaps = [(times[i+1] - times[i], times[i], times[i+1]) for i in range(len(times) - 1)]
-    # Sort gaps by size in descending order
-    largest_gaps = sorted(gaps, key=lambda x: x[0], reverse=True)[:segment_count]
+        # Calculate left and right bounds
+        left_vectors = [point for point in remaining_vectors if point[0] < summary_start]
+        right_vectors = [point for point in remaining_vectors if point[0] > summary_end]
 
-    # Find the midpoints of the largest gaps
-    segment_boundaries = sorted([(gap[1] + gap[2]) / 2 for gap in largest_gaps])
+        left_min = min(left_vectors, key=lambda x: x[0])[0] if left_vectors else summary_start
+        left_max = max(left_vectors, key=lambda x: x[0])[0] if left_vectors else summary_start
+        right_min = min(right_vectors, key=lambda x: x[0])[0] if right_vectors else summary_end
+        right_max = max(right_vectors, key=lambda x: x[0])[0] if right_vectors else summary_end
 
-    # Add the minimum and maximum times as boundaries
-    segment_boundaries = [min(times)] + segment_boundaries + [max(times)]
+        updated_vectors = []
 
-    # Define overlapping sheet segment boundaries
-    sheet_segment_boundaries = [
-        segment_boundaries[0] - (segment_boundaries[1] - segment_boundaries[0]) / 2
-    ] + [
-        (segment_boundaries[i] + segment_boundaries[i+1]) / 2
-        for i in range(len(segment_boundaries) - 1)
-    ] + [
-        segment_boundaries[-1] + (segment_boundaries[-1] - segment_boundaries[-2]) / 2
-    ]
-    print(sheet_segment_boundaries)
+        shift_amount = sheet_start - summary_start
+        scale_amount = (sheet_end - sheet_start) / (summary_end - summary_start)
 
-    for i in range(len(segment_boundaries) - 1):
-        # Audio segment boundaries
-        segment_start = segment_boundaries[i]
-        segment_end = segment_boundaries[i + 1]
+        for time, frequency in transformed_audio_vectors:
+            if summary_start <= time <= summary_end:
+                new_time = (time - summary_start) * scale_amount + sheet_start
+                updated_vectors.append((round(new_time, 4), frequency))
 
-        # Sheet segment boundaries with overlap
-        sheet_segment_start = sheet_segment_boundaries[i]
-        sheet_segment_end = sheet_segment_boundaries[i + 2]
-
-        # Extract segments for audio and sheet vectors
-        segment = [
-            vector for vector in transformed_audio_vectors
-            if segment_start <= vector[0] < segment_end
-        ]
-        sheet_segment = [
-            vector for vector in sheet_vectors
-            if sheet_segment_start <= vector[0] < sheet_segment_end
-        ]
-
-        if not segment or not sheet_segment:
-            continue  # Skip empty segments
-
-        # Run find_optimal_transformation with reset scale and shift
-        transformation_results = find_optimal_transformation(
-            segment,
-            sheet_segment,
-            scale_range=(0.5, 1.5),  # Reset scale range around 0
-            scale_step=0.01,
-            shift_range=(-0.2, 0.2),  # Reset shift range around 0
-            shift_step=0.025
-        )
-
-        # Extract results
-        segment_optimal_shift = transformation_results["optimal_shift"]
-        segment_optimal_scale = transformation_results["optimal_scale"]
-        segment_best_mapping = transformation_results["best_mapping"]
-        segment_unmapped_points = transformation_results["unmapped_points"]
-        print(segment_optimal_shift, segment_optimal_scale)
-
-        # Apply the optimized transformation
-        refined_segment = shift_and_scale_audio_vectors(
-            segment,
-            shift=segment_optimal_shift,
-            scale=segment_optimal_scale
-        )
-
-        # Append results
-        refined_audio_vectors.extend(refined_segment)
-        combined_unmapped_points.extend(segment_unmapped_points)
-
-        # Combine the best mapping
-        for key, value in segment_best_mapping.items():
-            if key not in combined_best_mapping:
-                combined_best_mapping[key] = value
+        # Adjust the left and right vectors while keeping left_min and right_max anchored
+        refined_vectors = []
+        for point in remaining_vectors:
+            time, frequency = point
+            if time < summary_start:
+                scale = (summary_start - left_min) / (left_max - left_min) if left_max != left_min else 1
+                shift = left_min - left_min * scale
+                new_time = time * scale + shift
+            elif time > summary_end:
+                scale = (right_max - sheet_end) / (right_max - right_min) if right_max != right_min else 1
+                shift = right_max - right_max * scale
+                new_time = time * scale + shift
             else:
-                combined_best_mapping[key].extend(value)
+                continue  # This should not happen; handled by the earlier filtering
+            refined_vectors.append((round(new_time, 4), frequency))
 
-    # Ensure all mappings are combined properly
-    for key in combined_best_mapping:
-        combined_best_mapping[key] = list(set(combined_best_mapping[key]))
+        # Combine updated and refined vectors
+        combined_vectors = updated_vectors + refined_vectors
+        combined_vectors.sort(key=lambda x: x[0])  # Ensure time order
 
-    return refined_audio_vectors, combined_best_mapping, combined_unmapped_points
+        return combined_vectors
+
+    def generate_remaining_vectors(transformed_audio_vectors, transformed_intervals, summary_start, summary_end):
+        remaining_vectors = []
+        locked_vectors = []
+        for point in transformed_audio_vectors:
+            time, frequency = point
+            in_transformed = any(start <= time <= end for start, end in transformed_intervals)
+            if not in_transformed:
+                remaining_vectors.append(point)
+            else:
+                locked_vectors.append(point)
+        return remaining_vectors, locked_vectors
+
+    # Initialize transformed intervals list
+    transformed_intervals = []
+
+    # Extract the relevant summary and sheet vectors
+    summary_tuple_1 = summary[1]  # (0.616, 1.504, 329.535)
+    sheet_tuple_1 = sheet_vectors[1]  # (0.0, 1.0, 329.63)
+
+    summary_start_1, summary_end_1, _ = summary_tuple_1
+    sheet_start_1, sheet_end_1, _ = sheet_tuple_1
+
+    # First transformation
+    transformed_vectors_1 = adjust_vectors(sheet_start_1, sheet_end_1, summary_start_1, summary_end_1, transformed_audio_vectors)
+    transformed_intervals.append((sheet_start_1, sheet_end_1))
+
+    # Extract the second summary and sheet intervals
+    summary_tuple_2 = summary[17]  # (3.402, 4.058, 346.047)
+    sheet_start_2 = 3.5  # (3.5, 4.0, 349.23)
+    sheet_end_2 = 4.5  # (4.0, 4.5, 349.23)
+
+    summary_start_2 = 3.3747411444141693
+    summary_end_2 = 4.058
+
+    # Generate remaining and locked vectors using transformed intervals
+    remaining_vectors, locked_vectors = generate_remaining_vectors(
+        transformed_vectors_1, transformed_intervals, summary_start_2, summary_end_2
+    )
+
+    # Second transformation using the selected remaining vectors
+    transformed_vectors_2 = adjust_vectors(sheet_start_2, sheet_end_2, summary_start_2, summary_end_2, remaining_vectors)
+    transformed_intervals.append((sheet_start_2, sheet_end_2))
+
+    # Combine locked vectors with the second transformed vectors
+    final_transformed_vectors = transformed_vectors_2 + locked_vectors
+    final_transformed_vectors.sort(key=lambda x: x[0])  # Ensure time order
+
+    return final_transformed_vectors
 
 
-def find_largest_time_gaps(transformed_audio_vectors):
-    # Sort the audio vectors by time for time gap calculations
-    transformed_audio_vectors.sort(key=lambda x: x[0])
-    time_gaps = []
+def find_gaps(transformed_audio_vectors, time_step=0.01, freq_step=2, radius=0.032):
+    # Divides audio vectors into bins based on density
+    # Returns (lower_freq_bound, upper_freq_bound): [list of time dividers]
 
-    # Calculate time gaps (sorted by time)
-    for i in range(len(transformed_audio_vectors) - 1):
-        start_time = transformed_audio_vectors[i][0]
-        end_time = transformed_audio_vectors[i + 1][0]
-        time_gap_size = end_time - start_time
-        time_midpoint = (start_time + end_time) / 2
-        time_gaps.append((time_gap_size, time_midpoint, start_time, end_time))
-
-    # Sort the audio vectors by frequency for frequency gap calculations
-    transformed_audio_vectors.sort(key=lambda x: x[1])
+    # Frequency bounds calculation
+    freqs = [v[1] for v in transformed_audio_vectors]
+    min_freq, max_freq = min(freqs), max(freqs)
+    sampled_freqs = np.arange(min_freq - 5, max_freq + 5, freq_step)
+    freq_densities = [
+        sum(1 for f in freqs if abs(f - freq) <= freq_step) for freq in sampled_freqs
+    ]
+    peaks, _ = find_peaks(freq_densities)
     freq_gaps = []
+    for i in range(len(peaks) - 1):
+        start, end = peaks[i], peaks[i + 1]
+        middle_index = (start + end) // 2
+        freq_gaps.append(sampled_freqs[middle_index])
 
-    # Calculate frequency gaps (sorted by frequency)
-    for i in range(len(transformed_audio_vectors) - 1):
-        start_freq = transformed_audio_vectors[i][1]
-        end_freq = transformed_audio_vectors[i + 1][1]
-        freq_gap_size = abs(end_freq - start_freq)
-        freq_midpoint = (start_freq + end_freq) / 2
-        freq_gaps.append((freq_gap_size, freq_midpoint, start_freq, end_freq))
+    # Include start and end boundaries for frequency bins
+    freq_gaps = [sampled_freqs[0]] + sorted(freq_gaps) + [sampled_freqs[-1]]
 
-    # Sort the gaps in descending order by size
-    time_gaps.sort(key=lambda x: x[0], reverse=True)
-    freq_gaps.sort(key=lambda x: x[0], reverse=True)
+    # Time bounds, ensures all points are boxed in all 4 edges
+    gap_dict = {}
 
-    # Process time gaps
-    largest_time_midpoints = []
-    blacklisted_time_intervals = []
+    for i in range(len(freq_gaps) - 1):
+        bin_start, bin_end = freq_gaps[i], freq_gaps[i + 1]
+        bin_times = [v[0] for v in transformed_audio_vectors if bin_start <= v[1] < bin_end]
+        if bin_times:
+            min_time, max_time = min(bin_times), max(bin_times)
+            time_bins = np.arange(min_time - radius, max_time + radius, time_step)
+            time_densities = [
+                sum(1 for t in bin_times if abs(t - time) <= radius) for time in time_bins
+            ]
 
-    for gap in time_gaps:
-        gap_size, midpoint, start_time, end_time = gap
-        if gap_size > 0.02 and all(
-            end_time <= start or start_time >= end
-            for start, end in blacklisted_time_intervals
-        ):
-            largest_time_midpoints.append(round(midpoint, 2))
-            blacklisted_time_intervals.append((start_time, end_time))
+            time_gaps = []
+            i = 0
+            blacklist = set()
+            while i < len(time_densities):
+                if i in blacklist:
+                    i += 1
+                    continue
 
-    # Process frequency gaps
-    largest_freq_midpoints = []
-    blacklisted_freq_intervals = []
+                if time_densities[i] == 0:
+                    start = i
+                    while i < len(time_densities) and time_densities[i] == 0:
+                        i += 1
+                    end = i - 1
+                    middle_index = (start + end) // 2
+                    middle_time = time_bins[middle_index]
+                    time_gaps.append(middle_time)
 
-    for gap in freq_gaps:
-        gap_size, midpoint, start_freq, end_freq = gap
-        if gap_size > 0.035 * start_freq and all(
-            end_freq <= start or start_freq >= end
-            for start, end in blacklisted_freq_intervals
-        ):
-            largest_freq_midpoints.append(round(midpoint, 2))
-            blacklisted_freq_intervals.append((min(start_freq, end_freq), max(start_freq, end_freq)))
+                    # Blacklist the radius around the identified zero-density interval
+                    blacklist.update(range(max(0, start - int(radius / time_step)),
+                                           min(len(time_densities), end + int(radius / time_step) + 1)))
+                else:
+                    i += 1
 
-    # Print the results
-    print("Time Gaps:")
-    for gap in largest_time_midpoints:
-        print(f"Time Midpoint: {gap}")
+            # Ensure explicit start and end time bounds for the bin
+            if time_bins[0] not in time_gaps:
+                time_gaps.insert(0, time_bins[0])
+            if time_bins[-1] not in time_gaps:
+                time_gaps.append(time_bins[-1])
 
-    print("Frequency Gaps:")
-    for gap in largest_freq_midpoints:
-        print(f"Frequency Midpoint: {gap}")
+            # Add the time gaps to the dictionary with the frequency bounds as key
+            gap_dict[(bin_start, bin_end)] = time_gaps
 
-    return sorted(largest_time_midpoints), sorted(largest_freq_midpoints)
+    return gap_dict
 
 
-def plot_results(audio_vectors, sheet_vectors, title, valid_points=None, time_gaps=None, freq_gaps=None):
-    plt.figure(figsize=(12, 8))
+def summarize_gaps(gap_dict, transformed_audio_vectors):
+    # Converts (lower_freq_bound, upper_freq_bound): [list of time dividers]
+    #   to list of (min_time, max_time, avg_frequency) tuples within each rectangle
+
+    summaries = []
+
+    for (freq_start, freq_end), time_gaps in gap_dict.items():
+        # Filter the vectors within the frequency range
+        for i in range(len(time_gaps) - 1):
+            time_start, time_end = time_gaps[i], time_gaps[i + 1]
+            vectors_in_box = [
+                v for v in transformed_audio_vectors
+                if freq_start <= v[1] < freq_end and time_start <= v[0] < time_end
+            ]
+
+            if vectors_in_box:
+                min_time = round(float(min(v[0] for v in vectors_in_box)), 4)
+                max_time = round(float(max(v[0] for v in vectors_in_box)), 4)
+                avg_frequency = round(float(sum(v[1] for v in vectors_in_box) / len(vectors_in_box)), 4)
+                summaries.append((min_time, max_time, avg_frequency))
+
+    return sorted(summaries, key=lambda x: (x[0], x[1]))
+
+
+def plot_results(audio_vectors, sheet_vectors, title, valid_points=None, gaps=None):
+    plt.figure(figsize=(14, 8))
 
     for i, (start_time, end_time, frequency) in enumerate(sheet_vectors):
         plt.plot([start_time, end_time], [frequency, frequency], color='cornflowerblue',
@@ -350,42 +379,37 @@ def plot_results(audio_vectors, sheet_vectors, title, valid_points=None, time_ga
 
     plt.scatter(audio_times, audio_freqs, label='Audio Frequencies', color='lightcoral', marker='.')
 
+    # Plot valid points connections
     if valid_points:
-        for (audio_time, audio_freq), (sheet_start_time, sheet_end_time, sheet_freq) in valid_points:
+        for i, ((audio_time, audio_freq), (sheet_start_time, sheet_end_time, sheet_freq)) in enumerate(valid_points):
             closest_sheet_time = max(min(audio_time, sheet_end_time), sheet_start_time)
             plt.plot([audio_time, closest_sheet_time], [audio_freq, sheet_freq], color='green', linestyle='--',
-                     linewidth=2)
+                     linewidth=2, label='Valid Connection' if i == 0 else "")
 
-    if time_gaps:
-        for gap_time in time_gaps:
-            plt.axvline(x=gap_time, color='black', linestyle=':', linewidth=1,
-                        label='Time Gap' if gap_time == time_gaps[0] else "")
-
-    if freq_gaps:
-        freq_gap_legend_added = False
-        for gap_freq in freq_gaps:
-            plt.axhline(y=gap_freq, color='purple', linestyle='--', linewidth=1,
-                        label='Freq Gap' if not freq_gap_legend_added else "")
+    # Plot gaps if provided
+    freq_gap_legend_added = False
+    if gaps:
+        for (freq_lower, freq_upper), time_gaps in gaps.items():
+            plt.axhline(y=freq_lower, color='purple', linestyle='--', linewidth=1,
+                        label='Frequency Gaps' if not freq_gap_legend_added else "")
+            plt.axhline(y=freq_upper, color='purple', linestyle='--', linewidth=1)
             freq_gap_legend_added = True
 
+            for gap_time in time_gaps:
+                plt.plot([gap_time, gap_time], [freq_lower, freq_upper], color='red', linestyle='--', linewidth=1,
+                         label='Time Gap' if freq_gap_legend_added and gap_time == time_gaps[0] else "")
+
+    # Plot configuration
     plt.title(title)
     plt.xlabel('Time (s)')
     plt.ylabel('Frequency (Hz)')
-    plt.legend()
+
+    # Adjust legend and layout
+    plt.legend(loc='upper left', bbox_to_anchor=(1.05, 1), fontsize='small', framealpha=0.8)
+    plt.subplots_adjust(right=0.8)  # Leave space for the legend
+
     plt.grid()
     plt.show()
-
-
-def calculate_dynamic_ranges(audio_vectors, sheet_vectors):
-    audio_duration = max([time for time, _ in audio_vectors]) - min([time for time, _ in audio_vectors])
-    sheet_duration = max([time for time, _ in sheet_vectors]) - min([time for time, _ in sheet_vectors])
-
-    scale_min = min(0.1, sheet_duration / audio_duration)
-    scale_max = max(10, sheet_duration / audio_duration)
-    shift_min = -2 * abs(sheet_duration - audio_duration)
-    shift_max = 2 * abs(sheet_duration - audio_duration)
-
-    return (shift_min, shift_max), (scale_min, scale_max)
 
 
 def find_optimal_transformation(audio_vectors, sheet_vectors,
